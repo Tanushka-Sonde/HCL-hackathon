@@ -1,0 +1,43 @@
+# Backend + frontend for the local demo mode.
+# NOTE: written for cloud readiness; not built or run on the dev machine
+# (Docker was not available there).
+#
+#   JWT_SECRET_KEY=$(python -c "import secrets; print(secrets.token_hex(32))") \
+#   GROQ_API_KEY=... docker compose -f docker-compose.demo.yml up --build
+#
+# Then open http://localhost:3000 and sign in (admin / admin123, alice / user123).
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.demo
+    environment:
+      DEMO_MODE: "true"
+      KIS_DATA_DIR: /data
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?set JWT_SECRET_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
+    volumes:
+      - kis-data:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+      args:
+        BACKEND_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  kis-data:
