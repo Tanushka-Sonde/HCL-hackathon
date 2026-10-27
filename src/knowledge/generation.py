@@ -42,10 +42,38 @@ SYSTEM_PROMPT = """You are an enterprise knowledge assistant. Follow these rules
 5. If sources disagree (for example two versions of one policy), say so, name both versions, and prefer the one with status "effective".
 6. Be concise: at most 5 sentences. Do not invent numbers, names or dates.
 7. If you compute a number (sum, average, difference, growth), write the expression as {{calc: 120+135+150}} using the exact figures from the sources, and do not write the result yourself. Cite the source of the figures.
-8. If the user asks to plot, chart, compare or show a trend, you may add ONE fenced block ```chart {"chart_type": "line|bar", "title": "...", "x_label": "...", "y_label": "...", "labels": [...], "series": [{"name": "...", "values": [...]}], "source_ids": ["S1"]}``` after the text. Use only numbers copied from the cited sources."""
+8. If the user asks to plot, chart, compare or show a trend, you may add ONE fenced block ```chart {"chart_type": "line|bar", "title": "...", "x_label": "...", "y_label": "...", "labels": [...], "series": [{"name": "...", "values": [...]}], "source_ids": ["S1"]}``` after the text. Always write at least one cited sentence before the block. Use only numbers copied from the cited sources."""
 
 
 _CLIENTS: dict[tuple[str, int], Any] = {}
+
+
+_ALT_TAG_RE = re.compile(r"【\s*([STU]\d+)[^】]*】")
+_DAGGER_TAG_RE = re.compile(r"\[\s*([STU]\d+)\s*†[^\]]*\]")
+_GROUP_TAG_RE = re.compile(r"\[\s*([STU]\d+(?:\s*[,;]\s*[STU]\d+)+)\s*\]")
+
+
+def normalize_citations(text: str) -> str:
+    """Rewrite citation styles some models use into our [S1] tags.
+
+    gpt-oss sometimes writes 【S1】 or 【S1†L3】, others write [S1, S2].
+    """
+    text = _ALT_TAG_RE.sub(r"[\1]", text)
+    text = _DAGGER_TAG_RE.sub(r"[\1]", text)
+    return _GROUP_TAG_RE.sub(
+        lambda m: " ".join(f"[{t.strip()}]" for t in re.split(r"[,;]", m.group(1))),
+        text,
+    )
+
+
+def model_options(settings: Settings) -> dict[str, Any]:
+    """Extra request options for the configured text model."""
+    if (
+        settings.groq_model_name.startswith("openai/gpt-oss")
+        and settings.groq_reasoning_effort
+    ):
+        return {"reasoning_effort": settings.groq_reasoning_effort}
+    return {}
 
 
 def get_async_client(settings: Settings) -> Any:
@@ -228,11 +256,12 @@ async def _generate_groq(
         ],
         temperature=0.0,
         max_tokens=max_tokens,
+        **model_options(settings),
     )
     usage: Any = completion.usage
     details = getattr(usage, "prompt_tokens_details", None)
     return GenerationResult(
-        text=(completion.choices[0].message.content or "").strip(),
+        text=normalize_citations((completion.choices[0].message.content or "").strip()),
         mode="groq",
         status="ok",
         model=settings.groq_model_name,

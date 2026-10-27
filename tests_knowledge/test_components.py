@@ -470,3 +470,19 @@ def test_filters_by_doc_id_and_version(service: KnowledgeService) -> None:
     assert result.selected
     assert {c.chunk["version"] for c in result.selected} == {"1.0"}
     assert {c.chunk["doc_id"] for c in result.selected} == {"HR-POL-007"}
+
+
+@pytest.mark.parametrize(
+    ("raw", "clean"),
+    [
+        ("Seven years 【S1】.", "Seven years [S1]."),
+        ("Seven years 【S1†L3-L5】.", "Seven years [S1]."),
+        ("Seven years [S2†source].", "Seven years [S2]."),
+        ("Budget and rule [T1, S2].", "Budget and rule [T1] [S2]."),
+        ("Already fine [S1].", "Already fine [S1]."),
+    ],
+)
+def test_model_citation_styles_are_normalized(raw: str, clean: str) -> None:
+    from src.knowledge.generation import normalize_citations
+
+    assert normalize_citations(raw) == clean

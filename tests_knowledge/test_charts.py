@@ -129,8 +129,12 @@ def test_model_chart_rejected_when_values_are_invented(
         generation, "_generate_groq", _llm_with_chart([30000, 99999, 45000])
     )
     resp = asyncio.run(svc.query(QueryRequest(query=QUESTION)))
-    assert not [v for v in resp.visuals if v["kind"] == "generated_chart"]
     assert "CHART_REJECTED" in resp.flags
+    # The invented chart is never shown; the chart built straight from the
+    # cited table is shown instead, with the real values only.
+    for v in resp.visuals:
+        if v["kind"] == "generated_chart":
+            assert 99999.0 not in v["spec"]["series"][0]["values"]
     event = svc.store.get_event(resp.query_id)
     assert event["chart_rejection"]["values"] == ["99999"]
 

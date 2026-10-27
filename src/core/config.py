@@ -57,8 +57,14 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     tavily_api_key: str = ""
     groq_api_key: str = ""
-    groq_model_name: str = "llama-3.3-70b-versatile"
-    groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
+    # Checked against the team key on 2026-10-27: the Llama 3.3 / Llama 4 Scout
+    # models were not offered; gpt-oss-120b (text) and qwen3.8-27b (text +
+    # images) were.
+    groq_model_name: str = "openai/gpt-oss-120b"
+    groq_vision_model: str = "qwen/qwen3.8-27b"
+    # Reasoning models (gpt-oss) spend output tokens thinking; "low" keeps
+    # answers inside the output budget. Ignored by other models.
+    groq_reasoning_effort: str = "low"
 
     # ── LLM Gateway ──────────────────────────────────────────
     llm_model_name: str = "models/gemini-2.0-flash"

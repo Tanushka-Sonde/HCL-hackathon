@@ -1,6 +1,6 @@
 # Evaluation & Configuration Comparison Report
 
-- Run batch: `d1baa7fd` (2026-10-27T09:24:44+00:00 -> 2026-10-27T09:25:01+00:00)
+- Run batch: `fe5a812f` (2026-10-27T09:42:51+00:00 -> 2026-10-27T09:43:03+00:00)
 - Generator: `extractive-v1` · embedder `all-MiniLM-L6-v2` · reranker `ms-marco-MiniLM-L-6-v2`
 - Evaluation set: `demo/eval/eval_set.json` (40 cases; 3 skipped because a capability is not configured)
 
@@ -16,15 +16,15 @@
 |---|---|---|---|
 | Expected behaviour pass rate | 0.9189 | 0.9189 | 0.9189 |
 | Retrieval hit rate (expected docs found) | 0.9259 | 0.9259 | 0.9259 |
-| Hit@1 (expected doc ranked first) | 0.8519 | 0.9259 | 0.8889 |
-| MRR@5 | 0.8889 | 0.9259 | 0.9074 |
+| Hit@1 (expected doc ranked first) | 0.8519 | 0.9259 | 0.8519 |
+| MRR@5 | 0.8765 | 0.9259 | 0.8889 |
 | Expected section retrieved | 1.0 | 1.0 | 1.0 |
-| Answer criteria met (must-include terms) | 0.8571 | 0.8214 | 0.8571 |
+| Answer criteria met (must-include terms) | 0.8571 | 0.8571 | 0.8571 |
 | Average grounding score | 0.9792 | 0.981 | 0.9792 |
 | Citations valid (answered cases only) | 1.0 | 1.0 | 1.0 |
 | Outcome = Success | 0.0 | 0.0 | 0.0 |
-| Median latency (ms) | 24.12 | 344.45 | 24.35 |
-| Max latency (ms) | 30.89 | 521.08 | 32.18 |
+| Median latency (ms) | 17.51 | 239.49 | 22.02 |
+| Max latency (ms) | 25.28 | 362.29 | 43.36 |
 | Total LLM tokens | 0 | 0 | 0 |
 | Estimated cost (USD) | 0.0 | 0.0 | 0.0 |
 
@@ -69,8 +69,8 @@
 | injection-02 | Prompt injection in the question | pass / - (partial) | pass / - (partial) | pass / - (partial) |
 | toolfail-01 | Tool failure | pass / - (failed) | pass / - (failed) | pass / - (failed) |
 | regression-01 | Regression question | pass / #1 (partial) | pass / #1 (partial) | pass / #1 (partial) |
-| exact-id-03 | Exact ID or acronym | pass / #2 (partial) | pass / #1 (partial) | pass / #2 (partial) |
-| exact-id-04 | Exact ID or acronym | pass / #2 (partial) | pass / #1 (partial) | pass / #1 (partial) |
+| exact-id-03 | Exact ID or acronym | pass / #3 (partial) | pass / #1 (partial) | pass / #2 (partial) |
+| exact-id-04 | Exact ID or acronym | pass / #3 (partial) | pass / #1 (partial) | pass / #2 (partial) |
 | exact-id-05 | Exact ID or acronym | pass / #1 (partial) | pass / #1 (partial) | pass / #1 (partial) |
 | acronym-02 | Exact ID or acronym | pass / #1 (partial) | pass / #1 (partial) | pass / #1 (partial) |
 | acronym-03 | Exact ID or acronym | pass / #1 (partial) | pass / #1 (partial) | pass / #1 (partial) |
@@ -96,15 +96,15 @@
 
 ## Observed failure cases (automatic list)
 
-- [A] **paraphrase-01** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `fd223a28-2c9d-44c1-994f-13f5a1b83756`
-- [A] **paraphrase-02** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `061d5ccc-114f-491f-8ea3-c33be94c801e`
-- [A] **structured-03** (Structured-data question): outcome `partial`, reasons ['LLM_FALLBACK'], rank None - query `93118653-4a8e-4ba7-9d59-e40215fef50d`
-- [B] **paraphrase-01** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `ded96ddd-20b7-48b9-921d-24d6bbb4e1b6`
-- [B] **paraphrase-02** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `75bd5496-9580-4664-a8bf-8019306431b0`
-- [B] **structured-03** (Structured-data question): outcome `partial`, reasons ['LLM_FALLBACK'], rank None - query `434fa10e-835d-40d3-91dd-7893fae61fde`
-- [C] **paraphrase-01** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `483ef755-e1f1-4382-bf0d-6ba05473d651`
-- [C] **paraphrase-02** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `a2daaf78-7b73-4309-92c5-d6749b22eba5`
-- [C] **structured-03** (Structured-data question): outcome `partial`, reasons ['LLM_FALLBACK'], rank None - query `1c65b486-72e7-456d-baa6-bfd62e0c14ed`
+- [A] **paraphrase-01** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `27bc8c13-dfcb-49d4-a0eb-77fcc4a1a806`
+- [A] **paraphrase-02** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `12a5a251-e7aa-49cf-aeee-c94c7a974eef`
+- [A] **structured-03** (Structured-data question): outcome `partial`, reasons ['LLM_FALLBACK'], rank None - query `af842bf3-ae00-474a-8486-fda53b58bb6b`
+- [B] **paraphrase-01** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `4290aa3b-bf5a-4137-9bf1-62b21b301f2a`
+- [B] **paraphrase-02** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `05f46d1f-32c7-4b45-baa0-b641eaa1e122`
+- [B] **structured-03** (Structured-data question): outcome `partial`, reasons ['LLM_FALLBACK'], rank None - query `c361e1bf-2889-402f-9197-af6d6c260c9f`
+- [C] **paraphrase-01** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `72ff7481-d127-46ab-8a24-2c1d02a50db0`
+- [C] **paraphrase-02** (Paraphrase (semantic)): outcome `partial`, reasons ['INSUFFICIENT_EVIDENCE'], rank 0 - query `fe532e88-99ec-4b2c-ae0a-71c0539a066c`
+- [C] **structured-03** (Structured-data question): outcome `partial`, reasons ['LLM_FALLBACK'], rank None - query `f461957d-d51b-4920-bf14-429eab92387a`
 
 ## What changed and recommendation
 
@@ -112,11 +112,11 @@ Configuration B adds BM25 keyword retrieval, Reciprocal Rank Fusion and a rerank
 - Expected behaviour pass rate: A=0.9189 B=0.9189 (delta +0.0)
 - Retrieval hit rate (expected docs found): A=0.9259 B=0.9259 (delta +0.0)
 - Hit@1 (expected doc ranked first): A=0.8519 B=0.9259 (delta +0.074)
-- MRR@5: A=0.8889 B=0.9259 (delta +0.037)
+- MRR@5: A=0.8765 B=0.9259 (delta +0.0494)
 - Expected section retrieved: A=1.0 B=1.0 (delta +0.0)
-- Answer criteria met (must-include terms): A=0.8571 B=0.8214 (delta -0.0357)
+- Answer criteria met (must-include terms): A=0.8571 B=0.8571 (delta +0.0)
 - Average grounding score: A=0.9792 B=0.981 (delta +0.0018)
 - Citations valid (answered cases only): A=1.0 B=1.0 (delta +0.0)
-- Median latency delta (B - A): +320.3 ms
+- Median latency delta (B - A): +222.0 ms
 
-**Recommended configuration: undecided**, because the metrics move in opposite directions; inspect the failure cases.
+**Recommended configuration: B (hybrid + rerank)**, because it improves quality without regressing any quality metric.

@@ -146,7 +146,7 @@ async def _judge(
 ) -> dict[str, Any] | None:
     if not svc.settings.groq_api_key:
         return None
-    from src.knowledge.generation import get_async_client
+    from src.knowledge.generation import get_async_client, model_options
     from src.knowledge.vision import parse_json_reply
 
     criteria = {
@@ -166,7 +166,8 @@ async def _judge(
                 },
             ],
             temperature=0.0,
-            max_tokens=120,
+            max_tokens=300,
+            **model_options(svc.settings),
         )
         data = parse_json_reply(completion.choices[0].message.content or "") or {}
         score = int(data.get("score", 0))

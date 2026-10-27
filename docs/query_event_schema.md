@@ -62,7 +62,7 @@ Several Partial reasons can apply at once.
 
 **Grounding rule:** a sentence is a *supported claim* when all three of these hold:
 - it cites at least one valid source, either directly or through a citation later in the same paragraph ("Fact one. Fact two [S1]." covers both; a tag never reaches across a paragraph break);
-- ≥ 50% of its content tokens appear in the cited sources;
+- ≥ 50% of its content words appear in the cited sources or in the user's question (numbers are checked separately);
 - every number it states appears in the cited sources, or is the result of a `{{calc: …}}` whose operands all appear there, or was stated by the user in the question.
 
 The grounding score is supported claims ÷ total claims. Citations and grounding are computed on the raw answer before masking, so users and admins get the same scores.
