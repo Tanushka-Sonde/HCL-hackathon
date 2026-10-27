@@ -25,6 +25,9 @@ class QueryRequest(BaseModel):
     status: str | None = Field(default=None, max_length=20)
     doc_id: str | None = Field(default=None, max_length=60)
     version: str | None = Field(default=None, max_length=20)
+    # Token budgets; the server also applies KIS_MAX_*_TOKENS_CAP.
+    max_input_tokens: int = Field(default=3000, ge=256, le=32_000)
+    max_output_tokens: int = Field(default=500, ge=32, le=4096)
 
 
 class LoginRequest(BaseModel):
@@ -133,6 +136,7 @@ class QueryResponse(BaseModel):
     safety: dict[str, Any]
     grounding_score: float | None
     calculations: list[dict[str, Any]] = Field(default_factory=list)
+    usage: dict[str, Any] = Field(default_factory=dict)
     latency_ms: float
     llm_mode: Literal["groq", "extractive"]
 

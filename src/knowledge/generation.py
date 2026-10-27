@@ -9,9 +9,10 @@ evidence sentences, used when no API key is configured or the call fails.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from src.core.logging import get_logger
@@ -70,6 +71,72 @@ class GenerationResult:
     cached_tokens: int | None = None
     latency_ms: float = 0.0
     error: str | None = None
+    finish_reason: str | None = None
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate (chars / 4), labelled "estimated" wherever shown.
+
+    tiktoken is deliberately not used: it downloads its encoder at runtime
+    (fails offline) and is not Llama's tokenizer anyway.
+    """
+    return math.ceil(len(text) / 4)
+
+
+@dataclass
+class BudgetFit:
+    evidence: list[Evidence]
+    estimated_input_tokens: int
+    dropped: list[str] = field(default_factory=list)
+    truncated: str | None = None
+
+
+_TRUNCATION_NOTE = " [truncated to fit the input token budget]"
+
+
+def fit_to_budget(
+    query: str,
+    evidence: list[Evidence],
+    tools: list[ToolCall],
+    turns: list[Turn],
+    max_input_tokens: int,
+) -> BudgetFit:
+    """Keep evidence, in rerank order, until the input budget is used up.
+
+    The system prompt, conversation turns, tool results and the question are
+    counted first. If even the first chunk does not fit, it is truncated.
+    """
+    used = estimate_tokens(SYSTEM_PROMPT) + estimate_tokens(
+        build_user_prompt(query, [], tools, turns)
+    )
+    fit = BudgetFit(evidence=[], estimated_input_tokens=used)
+    for ev in evidence:
+        cost = estimate_tokens(_evidence_block(ev)) + 1
+        if used + cost <= max_input_tokens:
+            fit.evidence.append(ev)
+            used += cost
+            continue
+        room = (max_input_tokens - used) * 4 - len(_TRUNCATION_NOTE) - 200
+        if not fit.evidence and room >= 200:
+            short = ev.model_copy(
+                update={"content": ev.content[:room] + _TRUNCATION_NOTE}
+            )
+            fit.evidence.append(short)
+            fit.truncated = ev.source_id
+            used += estimate_tokens(_evidence_block(short)) + 1
+        else:
+            fit.dropped.append(ev.source_id)
+    fit.estimated_input_tokens = used
+    return fit
+
+
+def _evidence_block(ev: Evidence) -> str:
+    attrs = (
+        f'id="{ev.source_id}" doc="{ev.doc_id}" title="{ev.title}" '
+        f'version="{ev.version or "n/a"}" status="{ev.status or "n/a"}" '
+        f'page="{ev.page or "n/a"}" section="{ev.section or "n/a"}"'
+    )
+    return f"<evidence {attrs}>\n{ev.content}\n</evidence>"
 
 
 def build_user_prompt(
@@ -82,13 +149,7 @@ def build_user_prompt(
             parts.append(
                 f"- User asked: {t.query}\n  Assistant answered: {t.answer[:300]}"
             )
-    for ev in evidence:
-        attrs = (
-            f'id="{ev.source_id}" doc="{ev.doc_id}" title="{ev.title}" '
-            f'version="{ev.version or "n/a"}" status="{ev.status or "n/a"}" '
-            f'page="{ev.page or "n/a"}" section="{ev.section or "n/a"}"'
-        )
-        parts.append(f"<evidence {attrs}>\n{ev.content}\n</evidence>")
+    parts.extend(_evidence_block(ev) for ev in evidence)
     for tc in tools:
         if tc.status == "success":
             parts.append(
@@ -111,12 +172,21 @@ async def generate(
     turns: list[Turn],
     conflicts: list[str],
     settings: Settings,
+    max_output_tokens: int = 500,
 ) -> GenerationResult:
     min_rel = settings.kis_min_evidence_score
     if settings.groq_api_key:
         start = time.perf_counter()
         try:
-            return await _generate_groq(query, evidence, tools, turns, settings, start)
+            return await _generate_groq(
+                query,
+                evidence,
+                tools,
+                turns,
+                settings,
+                start,
+                max_tokens=max_output_tokens,
+            )
         except Exception as exc:
             logger.warning("kis_llm_failed_using_extractive", error=str(exc)[:200])
             result = generate_extractive(query, evidence, tools, conflicts, min_rel)
@@ -133,6 +203,7 @@ async def _generate_groq(
     turns: list[Turn],
     settings: Settings,
     start: float,
+    max_tokens: int = 500,
 ) -> GenerationResult:
     completion = await get_async_client(settings).chat.completions.create(
         model=settings.groq_model_name,
@@ -144,7 +215,7 @@ async def _generate_groq(
             },
         ],
         temperature=0.0,
-        max_tokens=600,
+        max_tokens=max_tokens,
     )
     usage: Any = completion.usage
     details = getattr(usage, "prompt_tokens_details", None)
@@ -157,6 +228,7 @@ async def _generate_groq(
         output_tokens=getattr(usage, "completion_tokens", 0) or 0,
         cached_tokens=getattr(details, "cached_tokens", None) if details else None,
         latency_ms=round((time.perf_counter() - start) * 1000, 2),
+        finish_reason=completion.choices[0].finish_reason,
     )
 
 

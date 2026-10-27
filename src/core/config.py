@@ -103,6 +103,8 @@ class Settings(BaseSettings):
     kis_vision_enabled: bool = True
     kis_vision_max_pages: int = 30  # vision calls per document
     kis_table_chunk_max_chars: int = 4000
+    kis_max_input_tokens_cap: int = 8000
+    kis_max_output_tokens_cap: int = 1500
     # Unusual-activity rules (admin Users / Observability pages)
     kis_user_daily_token_cap: int = 200_000
     kis_anomaly_burst_per_5min: int = 20

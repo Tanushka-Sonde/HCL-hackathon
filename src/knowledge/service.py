@@ -31,7 +31,7 @@ from src.knowledge.context import (
     rewrite_with_llm,
 )
 from src.knowledge.embeddings import build_embedder, build_reranker
-from src.knowledge.generation import INSUFFICIENT_ANSWER, generate
+from src.knowledge.generation import INSUFFICIENT_ANSWER, fit_to_budget, generate
 from src.knowledge.masking import detect_pii, mask_for_user, mask_rows, merge_counts
 from src.knowledge.outcome import confidence_for, decide_outcome
 from src.knowledge.parsing import (
@@ -376,7 +376,6 @@ class KnowledgeService:
                     "stage": stage,
                     "category": type(exc).__name__,
                     "message": _sanitize_error(exc),
-                    "retried": False,
                     "correlation_id": correlation_id,
                 }
             )
@@ -518,6 +517,15 @@ class KnowledgeService:
             },
         }
         calculations: list[dict[str, Any]] = []
+        # Token budgets: the request's limits, never above the server caps.
+        max_in = min(req.max_input_tokens, settings.kis_max_input_tokens_cap)
+        max_out = min(req.max_output_tokens, settings.kis_max_output_tokens_cap)
+        budget_info: dict[str, Any] = {
+            "estimated_input_tokens": 0,
+            "evidence_dropped_for_budget": {"count": 0, "source_ids": []},
+            "truncated_source": None,
+        }
+        output_truncated = False
         if injection_blocked:
             answer = BLOCKED_QUERY_ANSWER
         elif stage_errors:
@@ -534,16 +542,29 @@ class KnowledgeService:
             stages["generation"] = "skipped"
         else:
             relevant = [ev for ev in evidence if ev.relevance >= min_rel]
+            fit = fit_to_budget(
+                normalized, relevant, tool_calls, selected_turns, max_in
+            )
+            budget_info.update(
+                estimated_input_tokens=fit.estimated_input_tokens,
+                evidence_dropped_for_budget={
+                    "count": len(fit.dropped),
+                    "source_ids": fit.dropped,
+                },
+                truncated_source=fit.truncated,
+            )
             t_g = time.perf_counter()
             try:
                 gen = await generate(
                     normalized,
-                    relevant,
+                    fit.evidence,
                     tool_calls,
                     selected_turns,
                     conflicts,
                     settings,
+                    max_output_tokens=max_out,
                 )
+                output_truncated = gen.finish_reason == "length"
                 answer, calculations = apply_calcs(gen.text or INSUFFICIENT_ANSWER)
                 llm_status = gen.status
                 generation.update(
@@ -603,6 +624,7 @@ class KnowledgeService:
             citations=citations,
             grounding_score=grounding["score"],
             grounding_threshold=settings.kis_grounding_threshold,
+            output_truncated=output_truncated,
         )
         flags: list[str] = []
         if conflicts:
@@ -611,6 +633,11 @@ class KnowledgeService:
             flags.append("EMBEDDED_INJECTION_REMOVED")
         if view["masked"]:
             flags.append("PII_MASKED")
+        if (
+            budget_info["truncated_source"]
+            or budget_info["evidence_dropped_for_budget"]["count"]
+        ):
+            flags.append("EVIDENCE_TRIMMED_FOR_BUDGET")
         confidence = confidence_for(outcome, grounding["score"], top_relevance)
         total_ms = _ms(t_start)
 
@@ -639,6 +666,7 @@ class KnowledgeService:
             + sum(view["masked"].values()),
         }
 
+        usage.update(budget_info, budget={"max_input": max_in, "max_output": max_out})
         _finalize_usage(usage, settings)
 
         # Steps 10-11 — presentation + observability event
@@ -762,6 +790,12 @@ class KnowledgeService:
             safety=view["safety"](safety),
             grounding_score=grounding["score"],
             calculations=calculations,
+            usage={
+                "input_tokens": usage["input_tokens"],
+                "output_tokens": usage["output_tokens"],
+                "estimated_input_tokens": usage["estimated_input_tokens"],
+                "budget": usage["budget"],
+            },
             latency_ms=total_ms,
             llm_mode="groq" if generation["provider"] == "groq" else "extractive",
         )

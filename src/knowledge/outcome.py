@@ -14,12 +14,14 @@ PARTIAL (fallback)
   NO_CITATIONS           an answer was given without any citation
   INVALID_CITATIONS      a citation does not map to returned evidence
   UNSUPPORTED_CLAIMS     grounding score below the configured threshold
+  OUTPUT_TRUNCATED       the model stopped at the output token limit
 SUCCESS
   OK                     evidence found, all citations valid, grounded,
                          no failed stage
 
 Flags do not change the outcome: CONFLICT_SURFACED, EMBEDDED_INJECTION_REMOVED,
-PII_MASKED (personal data or salaries masked for a user-role response).
+PII_MASKED (personal data or salaries masked for a user-role response),
+EVIDENCE_TRIMMED_FOR_BUDGET (evidence dropped or cut to fit the input budget).
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ REASON_DESCRIPTIONS: dict[str, str] = {
     "NO_CITATIONS": "Answer contains no citations",
     "INVALID_CITATIONS": "Answer cites sources that were not returned",
     "UNSUPPORTED_CLAIMS": "Some claims are not supported by cited evidence",
+    "OUTPUT_TRUNCATED": "The answer hit the output token limit and may be cut off",
 }
 
 
@@ -55,6 +58,7 @@ def decide_outcome(
     citations: list[Citation],
     grounding_score: float | None,
     grounding_threshold: float,
+    output_truncated: bool = False,
 ) -> tuple[str, list[str]]:
     """Return (outcome, reason_codes)."""
     if stage_errors:
@@ -81,6 +85,8 @@ def decide_outcome(
         reasons.append("INVALID_CITATIONS")
     if grounding_score is not None and grounding_score < grounding_threshold:
         reasons.append("UNSUPPORTED_CLAIMS")
+    if output_truncated:
+        reasons.append("OUTPUT_TRUNCATED")
     if reasons:
         return "partial", reasons
     return "success", ["OK"]
