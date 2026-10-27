@@ -98,6 +98,7 @@ class Settings(BaseSettings):
     kis_min_evidence_score: float = 0.6
     kis_grounding_threshold: float = 0.7
     kis_context_turns: int = 3
+    kis_token_expire_minutes: int = 480  # demo-mode login lifetime
     llm_price_input_per_1k: float = 0.00005
     llm_price_output_per_1k: float = 0.00008
     prompt_template_version: str = "kis-grounded-v1"

@@ -64,7 +64,45 @@ CREATE TABLE IF NOT EXISTS feedback (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_feedback_query ON feedback(query_id);
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_active_at TEXT NOT NULL,
+    query_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS auth_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT,
+    user_id TEXT,
+    event TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    ip TEXT,
+    detail TEXT,
+    ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_auth_events_ts ON auth_events(ts);
 """
+
+# Columns added after the first release; created on startup if missing.
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "feedback": {"user_id": "TEXT"},
+}
+
+# Public user fields. password_hash is deliberately absent: no API returns it.
+USER_PUBLIC_FIELDS = "id, username, role, is_active, created_at"
 
 
 class KnowledgeStore:
@@ -78,7 +116,18 @@ class KnowledgeStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was first created."""
+        for table, columns in _ADDED_COLUMNS.items():
+            existing = {
+                r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")
+            }
+            for name, decl in columns.items():
+                if name not in existing:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     def close(self) -> None:
         self._conn.close()
@@ -246,7 +295,12 @@ class KnowledgeStore:
     # ── Feedback ─────────────────────────────────────────────
 
     def add_feedback(
-        self, query_id: str, helpful: bool, comment: str | None, created_at: str
+        self,
+        query_id: str,
+        helpful: bool,
+        comment: str | None,
+        created_at: str,
+        user_id: str | None = None,
     ) -> bool:
         with self._lock:
             exists = self._conn.execute(
@@ -255,9 +309,9 @@ class KnowledgeStore:
             if not exists:
                 return False
             self._conn.execute(
-                "INSERT INTO feedback (query_id, helpful, comment, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (query_id, int(helpful), comment, created_at),
+                "INSERT INTO feedback (query_id, helpful, comment, created_at, "
+                "user_id) VALUES (?, ?, ?, ?, ?)",
+                (query_id, int(helpful), comment, created_at, user_id),
             )
             self._conn.commit()
         return True
@@ -277,3 +331,109 @@ class KnowledgeStore:
             "comment": row["comment"],
             "created_at": row["created_at"],
         }
+
+    # ── Users, sessions, auth events ─────────────────────────
+
+    def create_user(self, user: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO users (id, username, password_hash, role, is_active, "
+                "created_at) VALUES (:id, :username, :password_hash, :role, "
+                ":is_active, :created_at)",
+                user,
+            )
+            self._conn.commit()
+
+    def get_user_credentials(self, username: str) -> dict[str, Any] | None:
+        """Internal: includes password_hash. Never return this from an API."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE username = ?", (username,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {USER_PUBLIC_FIELDS} FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return _public_user(row)
+
+    def list_users(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {USER_PUBLIC_FIELDS} FROM users ORDER BY created_at"
+            ).fetchall()
+        return [u for u in (_public_user(r) for r in rows) if u]
+
+    def count_users(self) -> int:
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+    def record_auth_event(
+        self,
+        event: str,
+        success: bool,
+        ts: str,
+        *,
+        username: str | None = None,
+        user_id: str | None = None,
+        ip: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO auth_events (username, user_id, event, success, ip, "
+                "detail, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (username, user_id, event, int(success), ip, detail, ts),
+            )
+            self._conn.commit()
+
+    def list_auth_events(self, since: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM auth_events"
+        params: list[Any] = []
+        if since:
+            sql += " WHERE ts >= ?"
+            params.append(since)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY ts", params).fetchall()
+        return [dict(r) for r in rows]
+
+    def session_owner(self, session_id: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT user_id FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return row["user_id"] if row else None
+
+    def touch_session(self, session_id: str, user_id: str, ts: str) -> None:
+        """Create the session on first use; bump activity and query count."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO sessions (session_id, user_id, created_at, "
+                "last_active_at, query_count) VALUES (?, ?, ?, ?, 1) "
+                "ON CONFLICT(session_id) DO UPDATE SET last_active_at = "
+                "excluded.last_active_at, query_count = query_count + 1",
+                (session_id, user_id, ts, ts),
+            )
+            self._conn.commit()
+
+    def list_sessions(self, user_id: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM sessions"
+        params: list[Any] = []
+        if user_id:
+            sql += " WHERE user_id = ?"
+            params.append(user_id)
+        with self._lock:
+            rows = self._conn.execute(
+                sql + " ORDER BY last_active_at DESC", params
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def _public_user(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    user = dict(row)
+    user["is_active"] = bool(user["is_active"])
+    return user

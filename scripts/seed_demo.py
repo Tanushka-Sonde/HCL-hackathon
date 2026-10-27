@@ -18,6 +18,10 @@ from src.knowledge.service import KnowledgeService  # noqa: E402
 
 def main() -> None:
     svc = KnowledgeService(get_settings())
+    created = svc.auth.ensure_demo_users()
+    if created:
+        print(f"Created demo accounts: {', '.join(created)}")
+        print("  admin / admin123 (admin), alice / user123, bob / user123 (users)")
     result = svc.ingest_demo()
     for item in result.ingested:
         d = item.document

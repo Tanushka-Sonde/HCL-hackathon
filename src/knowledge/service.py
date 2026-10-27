@@ -16,8 +16,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from src.core.exceptions import AuthorizationError
 from src.core.logging import get_logger
 from src.ingestion.pipeline import RecursiveTextChunker
+from src.knowledge.auth import SYSTEM_EVAL_USER, AuthService, CurrentUser
 from src.knowledge.context import ConversationMemory, Turn, resolve
 from src.knowledge.embeddings import build_embedder, build_reranker
 from src.knowledge.generation import INSUFFICIENT_ANSWER, generate
@@ -84,6 +86,7 @@ class KnowledgeService:
         self.data_dir = Path(data_dir or PROJECT_ROOT / settings.kis_data_dir)
         self.demo_dir = Path(demo_dir or PROJECT_ROOT / "demo")
         self.store = KnowledgeStore(self.data_dir / "kis.db")
+        self.auth = AuthService(self.store, settings)
         self.embedder, self.embedder_name, semantic = build_embedder(settings)
         self.reranker = build_reranker(settings)
         self.index = KnowledgeIndex(self.embedder, semantic)
@@ -221,11 +224,20 @@ class KnowledgeService:
         req: QueryRequest,
         correlation_id: str | None = None,
         eval_meta: dict[str, Any] | None = None,
+        user: CurrentUser | None = None,
     ) -> QueryResponse:
         settings = self.settings
         t_start = time.perf_counter()
         query_id = str(uuid.uuid4())
         session_id = req.session_id or str(uuid.uuid4())
+        # Evaluation runs (started by an admin) act as the system eval user.
+        user = user or CurrentUser(**SYSTEM_EVAL_USER)
+        # A conversation belongs to the user who started it.
+        owner = self.store.session_owner(session_id)
+        if owner is not None and owner != user.id:
+            raise AuthorizationError("This conversation belongs to another user.")
+        self.store.touch_session(session_id, user.id, _now())
+        memory_key = f"{user.id}:{session_id}"
         correlation_id = correlation_id or query_id
         min_rel = settings.kis_min_evidence_score
 
@@ -255,7 +267,7 @@ class KnowledgeService:
 
         # Step 4 — query understanding & conversation context
         t = time.perf_counter()
-        history = self.memory.history(session_id)
+        history = self.memory.history(memory_key)
         normalized, selected_turns = resolve(req.query, history)
         perf["context_ms"] = _ms(t)
         stages["context"] = "ok"
@@ -460,7 +472,7 @@ class KnowledgeService:
         # A blocked injection attempt never becomes context for later turns.
         if not injection_blocked:
             self.memory.add(
-                session_id,
+                memory_key,
                 Turn(
                     query_id=query_id,
                     query=req.query,
@@ -487,6 +499,9 @@ class KnowledgeService:
                 "query_id": query_id,
                 "timestamp": _now(),
                 "session_id": session_id,
+                "user_id": user.id,
+                "username": user.username,
+                "role": user.role,
                 "app_version": settings.app_version,
                 "config_id": req.config_id,
                 "config_label": self.config_label(req.config_id),
@@ -641,9 +656,15 @@ class KnowledgeService:
 
     # ── Feedback ─────────────────────────────────────────────
 
-    def add_feedback(self, query_id: str, helpful: bool, comment: str | None) -> bool:
+    def add_feedback(
+        self,
+        query_id: str,
+        helpful: bool,
+        comment: str | None,
+        user_id: str | None = None,
+    ) -> bool:
         clean = comment.strip()[:1000] if comment else None
-        return self.store.add_feedback(query_id, helpful, clean, _now())
+        return self.store.add_feedback(query_id, helpful, clean, _now(), user_id)
 
 
 def _doc_fields(row: dict[str, Any]) -> dict[str, Any]:

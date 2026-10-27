@@ -25,6 +25,17 @@ class QueryRequest(BaseModel):
     status: str | None = Field(default=None, max_length=20)
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=6, max_length=128)
+    role: Literal["admin", "user"] = "user"
+
+
 class FeedbackRequest(BaseModel):
     """Helpful / not-helpful feedback on a query (FR-11)."""
 
@@ -117,6 +128,24 @@ class QueryResponse(BaseModel):
     grounding_score: float | None
     latency_ms: float
     llm_mode: Literal["groq", "extractive"]
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    username: str
+    role: Literal["admin", "user"]
+    expires_in_minutes: int
+
+
+class UserInfo(BaseModel):
+    """Public user fields. There is deliberately no password field."""
+
+    id: str
+    username: str
+    role: Literal["admin", "user"]
+    is_active: bool
+    created_at: str
 
 
 class DocumentInfo(BaseModel):

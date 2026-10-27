@@ -56,9 +56,18 @@ def service(
     svc = KnowledgeService(
         offline_settings, data_dir=tmp_path_factory.mktemp("data"), demo_dir=demo_dir
     )
+    svc.auth.ensure_demo_users()  # admin/admin123, alice/user123, bob/user123
     result = svc.ingest_demo()
     assert not result.errors, result.errors
     return svc
+
+
+def _token(c: TestClient, username: str, password: str) -> str:
+    resp = c.post(
+        "/api/v1/kis/auth/login", json={"username": username, "password": password}
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()["access_token"]
 
 
 @pytest.fixture(scope="session")
@@ -72,4 +81,16 @@ def client(service: KnowledgeService, offline_settings: Settings) -> TestClient:
     app.dependency_overrides[routes.get_service] = lambda: service
     app.dependency_overrides[get_settings] = lambda: offline_settings
     with TestClient(app) as c:
+        # Requests are made as the admin unless a test passes other headers.
+        c.headers["Authorization"] = f"Bearer {_token(c, 'admin', 'admin123')}"
         yield c
+
+
+@pytest.fixture(scope="session")
+def user_headers(client: TestClient) -> dict[str, str]:
+    return {"Authorization": f"Bearer {_token(client, 'alice', 'user123')}"}
+
+
+@pytest.fixture(scope="session")
+def bob_headers(client: TestClient) -> dict[str, str]:
+    return {"Authorization": f"Bearer {_token(client, 'bob', 'user123')}"}
