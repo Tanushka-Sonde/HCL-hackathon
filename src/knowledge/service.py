@@ -32,7 +32,13 @@ from src.knowledge.context import (
     rewrite_with_llm,
 )
 from src.knowledge.embeddings import build_embedder, build_reranker
-from src.knowledge.generation import INSUFFICIENT_ANSWER, fit_to_budget, generate
+from src.knowledge.generation import (
+    INSUFFICIENT_ANSWER,
+    SYSTEM_PROMPT,
+    build_user_prompt,
+    fit_to_budget,
+    generate,
+)
 from src.knowledge.masking import detect_pii, mask_for_user, mask_rows, merge_counts
 from src.knowledge.outcome import confidence_for, decide_outcome
 from src.knowledge.parsing import (
@@ -632,6 +638,13 @@ class KnowledgeService:
                 },
                 truncated_source=fit.truncated,
             )
+            # Stored for the trace so reviewers see exactly what the model got.
+            generation["prompt"] = {
+                "system": SYSTEM_PROMPT,
+                "user": build_user_prompt(
+                    normalized, fit.evidence, tool_calls, selected_turns, image_text
+                ),
+            }
             t_g = time.perf_counter()
             try:
                 gen = await generate(
