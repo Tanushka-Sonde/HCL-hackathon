@@ -60,7 +60,12 @@ def compute_metrics(
 
     safety_query = sum(1 for e in events if e["safety"]["query_injection"])
     safety_chunk = sum(1 for e in events if e["safety"]["chunk_injections"])
-    safety_pii = sum(1 for e in events if e["safety"]["pii_redactions"])
+    # pii_redactions: events recorded before role-based masking existed.
+    safety_pii = sum(
+        1
+        for e in events
+        if e["safety"].get("pii_masked") or e["safety"].get("pii_redactions")
+    )
     safety_any = sum(1 for e in events if e["safety"]["events"])
 
     def lat(key: str, only_positive: bool = True) -> dict[str, float | None]:
@@ -125,7 +130,7 @@ def compute_metrics(
             "queries_with_events": safety_any,
             "query_injection": safety_query,
             "embedded_injection": safety_chunk,
-            "pii_redaction": safety_pii,
+            "pii_masked": safety_pii,
         },
         "latency_ms": {
             "retrieval": lat("retrieval_ms"),

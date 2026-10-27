@@ -132,14 +132,22 @@ def _text_lines(page, lines: list[str], y: float, size: float = 11) -> float:
     return y
 
 
+def _save(doc, path: Path) -> None:
+    """Fixed metadata and no random file ID, so rebuilds are byte-identical."""
+    doc.set_metadata(
+        {"creationDate": "D:20260101000000", "modDate": "D:20260101000000"}
+    )
+    doc.save(str(path), no_new_id=True, garbage=3, deflate=True)
+    doc.close()
+
+
 def write_scanned_receipt_pdf(path: Path) -> None:
     import pymupdf
 
     doc = pymupdf.open()
     page = doc.new_page(width=595, height=842)
     page.insert_image(pymupdf.Rect(40, 60, 555, 470), stream=receipt_image())
-    doc.save(str(path))
-    doc.close()
+    _save(doc, path)
 
 
 def write_pnl_pdf(path: Path) -> None:
@@ -184,8 +192,7 @@ def write_pnl_pdf(path: Path) -> None:
         ["2. NOTES", "Cost includes salaries, cloud hosting and office rent."],
         y0 + len(rows) * row_h + 40,
     )
-    doc.save(str(path))
-    doc.close()
+    _save(doc, path)
 
 
 def write_chart_pdf(path: Path) -> None:
@@ -212,8 +219,7 @@ def write_chart_pdf(path: Path) -> None:
     page.insert_image(
         pymupdf.Rect(60, y + 10, 535, y + 10 + 296), stream=bar_chart_image()
     )
-    doc.save(str(path))
-    doc.close()
+    _save(doc, path)
 
 
 COMPENSATION_DOC = """Doc-ID: HR-REC-020
@@ -227,9 +233,9 @@ Effective: 2026-04-01
 These synthetic records support payroll questions. All people and numbers are fictional.
 
 2. RECORDS
-Asha Rao, Engineering Manager, employee E-001. Annual salary: USD 148,000. Email: asha.rao@orion-synthetic.example. Phone: +1 415-555-0142.
-Tom Becker, Data Engineer, employee E-002. Annual salary: USD 121,500. Email: tom.becker@orion-synthetic.example. Phone: +1 415-555-0178.
-Mei Lin, Cloud Architect, employee E-007. Annual salary: USD 139,000. Email: mei.lin@orion-synthetic.example. Phone: +1 415-555-0193.
+Asha Rao (Engineering Manager, employee E-001) has an annual salary of USD 148,000, email asha.rao@orion-synthetic.example and phone +1 415-555-0142.
+Tom Becker (Data Engineer, employee E-002) has an annual salary of USD 121,500, email tom.becker@orion-synthetic.example and phone +1 415-555-0178.
+Mei Lin (Cloud Architect, employee E-007) has an annual salary of USD 139,000, email mei.lin@orion-synthetic.example and phone +1 415-555-0193.
 
 3. PAYROLL CALENDAR
 Salaries are paid monthly on the last working day. Bonus decisions are made in March.

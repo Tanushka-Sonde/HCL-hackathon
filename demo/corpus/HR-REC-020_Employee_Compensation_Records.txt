@@ -9,9 +9,9 @@ Effective: 2026-04-01
 These synthetic records support payroll questions. All people and numbers are fictional.
 
 2. RECORDS
-Asha Rao, Engineering Manager, employee E-001. Annual salary: USD 148,000. Email: asha.rao@orion-synthetic.example. Phone: +1 415-555-0142.
-Tom Becker, Data Engineer, employee E-002. Annual salary: USD 121,500. Email: tom.becker@orion-synthetic.example. Phone: +1 415-555-0178.
-Mei Lin, Cloud Architect, employee E-007. Annual salary: USD 139,000. Email: mei.lin@orion-synthetic.example. Phone: +1 415-555-0193.
+Asha Rao (Engineering Manager, employee E-001) has an annual salary of USD 148,000, email asha.rao@orion-synthetic.example and phone +1 415-555-0142.
+Tom Becker (Data Engineer, employee E-002) has an annual salary of USD 121,500, email tom.becker@orion-synthetic.example and phone +1 415-555-0178.
+Mei Lin (Cloud Architect, employee E-007) has an annual salary of USD 139,000, email mei.lin@orion-synthetic.example and phone +1 415-555-0193.
 
 3. PAYROLL CALENDAR
 Salaries are paid monthly on the last working day. Bonus decisions are made in March.

@@ -8,11 +8,12 @@ import pytest
 
 from src.core.exceptions import ValidationError
 from src.knowledge.context import Turn, resolve
+from src.knowledge.masking import mask_for_user, mask_rows
 from src.knowledge.outcome import decide_outcome
 from src.knowledge.parsing import parse_document
 from src.knowledge.retrieval import BM25Index
 from src.knowledge.router import route_query
-from src.knowledge.safety import detect_injection, redact_pii, sanitize_evidence
+from src.knowledge.safety import detect_injection, sanitize_evidence
 from src.knowledge.schemas import Citation, Evidence, ToolCall
 from src.knowledge.text import tokenize
 from src.knowledge.validation import (
@@ -241,12 +242,38 @@ def test_injection_detection_and_sanitizing() -> None:
     )
 
 
-def test_pii_redaction() -> None:
-    text, counts = redact_pii(
+def test_pii_masking_keeps_business_figures() -> None:
+    text, counts = mask_for_user(
         "Contact jane.doe@example.com or 555-123-4567. Budget PRJ-1002 is USD 250,000."
     )
     assert "example.com" not in text and counts == {"email": 1, "phone": 1}
     assert "PRJ-1002" in text and "250,000" in text
+
+
+@pytest.mark.parametrize(
+    ("text", "token"),
+    [
+        ("Annual salary: USD 148,000.", "[SALARY]"),
+        ("Her CTC is 18 LPA this year.", "[SALARY]"),
+        ("Bonus of Rs. 2,00,000 paid in March.", "[SALARY]"),
+        ("PAN ABCDE1234F on file.", "[PAN]"),
+        ("Aadhaar 1234 5678 9012.", "[ID]"),
+        ("Card 4111 1111 1111 1111.", "[CARD]"),
+        ("Salary account no. 123456789012.", "[ACCOUNT]"),
+        ("Call +91 98765 43210 today.", "[PHONE]"),
+    ],
+)
+def test_masking_patterns(text: str, token: str) -> None:
+    masked, counts = mask_for_user(text)
+    assert token in masked and counts
+
+
+def test_mask_rows_hides_sensitive_columns() -> None:
+    rows, counts = mask_rows(
+        [{"name": "Asha", "salary_usd": 148000, "note": "mail asha@x.example"}]
+    )
+    assert rows == [{"name": "Asha", "salary_usd": "[MASKED]", "note": "mail [EMAIL]"}]
+    assert counts == {"column": 1, "email": 1}
 
 
 # ── Validation & outcome rules ───────────────────────────────

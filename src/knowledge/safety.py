@@ -1,4 +1,6 @@
-"""Safety controls: prompt-injection detection, evidence sanitisation, PII redaction.
+"""Safety controls: prompt-injection detection and evidence sanitisation.
+
+PII and salary masking for user-role responses lives in ``masking.py``.
 
 Retrieved content is treated as untrusted data. Sentences inside evidence
 that look like instructions to the assistant are removed before the prompt
@@ -44,15 +46,6 @@ INJECTION_PATTERNS: dict[str, re.Pattern[str]] = {
     ),
 }
 
-_PII_PATTERNS: dict[str, re.Pattern[str]] = {
-    "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
-    "phone": re.compile(
-        r"(?<![\w-])(?:\+?\d{1,3}[\s-])?\(?\d{3}\)?[\s-]\d{3}[\s-]\d{4}\b"
-    ),
-    "national_id": re.compile(r"\b\d{4}\s\d{4}\s\d{4}\b"),
-    "card_number": re.compile(r"\b(?:\d{4}[\s-]){3}\d{4}\b"),
-}
-
 BLOCKED_QUERY_ANSWER = (
     "I can't follow instructions that try to change my rules or reveal hidden "
     "configuration. Please ask a question about the indexed documents or business data."
@@ -89,13 +82,3 @@ def sanitize_evidence(text: str) -> SanitizedText:
     return SanitizedText(
         text=" ".join(kept), removed=removed, patterns=sorted(patterns)
     )
-
-
-def redact_pii(text: str) -> tuple[str, dict[str, int]]:
-    """Mask PII patterns in model output; returns (text, counts by type)."""
-    counts: dict[str, int] = {}
-    for name, rx in _PII_PATTERNS.items():
-        text, n = rx.subn(f"[REDACTED {name.upper()}]", text)
-        if n:
-            counts[name] = n
-    return text, counts

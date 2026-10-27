@@ -24,6 +24,7 @@ from src.knowledge.auth import SYSTEM_EVAL_USER, AuthService, CurrentUser
 from src.knowledge.context import ConversationMemory, Turn, resolve
 from src.knowledge.embeddings import build_embedder, build_reranker
 from src.knowledge.generation import INSUFFICIENT_ANSWER, generate
+from src.knowledge.masking import detect_pii, mask_for_user, mask_rows, merge_counts
 from src.knowledge.outcome import confidence_for, decide_outcome
 from src.knowledge.parsing import (
     ALLOWED_EXTENSIONS,
@@ -37,7 +38,6 @@ from src.knowledge.router import route_query, strip_data_terms
 from src.knowledge.safety import (
     BLOCKED_QUERY_ANSWER,
     detect_injection,
-    redact_pii,
     sanitize_evidence,
 )
 from src.knowledge.schemas import (
@@ -539,7 +539,8 @@ class KnowledgeService:
 
         # Step 9 — validation
         t_v = time.perf_counter()
-        answer, pii_counts = redact_pii(answer)
+        # Citations and grounding are checked on the raw answer; role-based
+        # masking is applied afterwards, only to what the user is shown.
         citations = validate_citations(answer, evidence, tool_calls)
         if stages.get("generation") in ("ok", "fallback"):
             grounding = assess_grounding(answer, evidence, tool_calls)
@@ -553,6 +554,12 @@ class KnowledgeService:
                 "rule": "not applicable: no generated answer",
             }
         insufficient = is_insufficient(answer)
+        pii_detected = {
+            "question": detect_pii(req.query),
+            "evidence": merge_counts(*(detect_pii(ev.content) for ev in evidence)),
+            "answer": detect_pii(answer),
+        }
+        view = self._present(answer, evidence, tool_calls, conflicts, user)
         perf["validation_ms"] = _ms(t_v)
         stages["validation"] = "ok"
 
@@ -573,8 +580,8 @@ class KnowledgeService:
             flags.append("CONFLICT_SURFACED")
         if chunk_injections:
             flags.append("EMBEDDED_INJECTION_REMOVED")
-        if pii_counts:
-            flags.append("PII_REDACTED")
+        if view["masked"]:
+            flags.append("PII_MASKED")
         confidence = confidence_for(outcome, grounding["score"], top_relevance)
         total_ms = _ms(t_start)
 
@@ -595,11 +602,12 @@ class KnowledgeService:
             "query_injection": query_injection,
             "injection_blocked": injection_blocked,
             "chunk_injections": chunk_injections,
-            "pii_redactions": pii_counts,
+            "pii_detected": pii_detected,
+            "pii_masked": view["masked"],
             "fallback": outcome != "success",
             "events": len(query_injection)
             + len(chunk_injections)
-            + sum(pii_counts.values()),
+            + sum(view["masked"].values()),
         }
 
         # Steps 10-11 — presentation + observability event
@@ -684,6 +692,7 @@ class KnowledgeService:
             "usage": usage,
             "errors": errors,
             "eval": eval_meta,
+            "masking": {"applied": not user.is_admin, "counts": view["masked"]},
         }
         try:
             self.store.insert_event(event)
@@ -701,23 +710,83 @@ class KnowledgeService:
         return QueryResponse(
             query_id=query_id,
             session_id=session_id,
-            answer=answer,
+            answer=view["answer"],
             outcome=outcome,  # type: ignore[arg-type]
             reason_codes=reasons,
             flags=flags,
             confidence=confidence,  # type: ignore[arg-type]
             route=decision.route,  # type: ignore[arg-type]
             citations=citations,
-            evidence=evidence,
-            tool_calls=[
-                tc.model_copy(update={"error_detail": None}) for tc in tool_calls
-            ],
-            conflicts=conflicts,
-            safety=safety,
+            evidence=view["evidence"],
+            tool_calls=view["tool_calls"],
+            conflicts=view["conflicts"],
+            safety=view["safety"](safety),
             grounding_score=grounding["score"],
             latency_ms=total_ms,
             llm_mode="groq" if generation["provider"] == "groq" else "extractive",
         )
+
+    @staticmethod
+    def _present(
+        answer: str,
+        evidence: list[Evidence],
+        tool_calls: list[ToolCall],
+        conflicts: list[str],
+        user: CurrentUser,
+    ) -> dict[str, Any]:
+        """What this role may see. Admins: raw. Users: PII and salaries masked."""
+        public_tools = [
+            tc.model_copy(update={"error_detail": None}) for tc in tool_calls
+        ]
+        if user.is_admin:
+            return {
+                "answer": answer,
+                "evidence": evidence,
+                "tool_calls": public_tools,
+                "conflicts": conflicts,
+                "masked": {},
+                "safety": lambda s: s,
+            }
+        counts: list[dict[str, int]] = []
+
+        def mask(text: str) -> str:
+            masked, found = mask_for_user(text)
+            counts.append(found)
+            return masked
+
+        masked_answer = mask(answer)
+        masked_evidence = [
+            ev.model_copy(update={"content": mask(ev.content)}) for ev in evidence
+        ]
+        masked_tools = []
+        for tc in public_tools:
+            rows, found = mask_rows(tc.rows)
+            counts.append(found)
+            masked_tools.append(
+                tc.model_copy(
+                    update={"rows": rows, "result_summary": mask(tc.result_summary)}
+                )
+            )
+        masked_conflicts = [mask(c) for c in conflicts]
+
+        def safety_view(safety: dict[str, Any]) -> dict[str, Any]:
+            injections = [
+                {**ci, "removed_text": [mask(t) for t in ci.get("removed_text", [])]}
+                for ci in safety["chunk_injections"]
+            ]
+            # Users do not see what PII the documents contain, only that some
+            # of it was masked in their answer.
+            hidden = {"pii_detected": None, "chunk_injections": injections}
+            return {**safety, **hidden}
+
+        return {
+            "answer": masked_answer,
+            "evidence": masked_evidence,
+            "tool_calls": masked_tools,
+            "conflicts": masked_conflicts,
+            "masked": merge_counts(*counts),
+            "safety": safety_view,
+        }
 
     def _to_evidence(
         self, selected: list[Candidate], injections: list[dict[str, Any]]

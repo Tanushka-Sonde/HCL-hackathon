@@ -19,7 +19,7 @@ SUCCESS
                          no failed stage
 
 Flags do not change the outcome: CONFLICT_SURFACED, EMBEDDED_INJECTION_REMOVED,
-PII_REDACTED.
+PII_MASKED (personal data or salaries masked for a user-role response).
 """
 
 from __future__ import annotations
