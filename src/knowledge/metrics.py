@@ -60,7 +60,12 @@ def compute_metrics(
 
     safety_query = sum(1 for e in events if e["safety"]["query_injection"])
     safety_chunk = sum(1 for e in events if e["safety"]["chunk_injections"])
-    safety_pii = sum(1 for e in events if e["safety"]["pii_redactions"])
+    # pii_redactions: events recorded before role-based masking existed.
+    safety_pii = sum(
+        1
+        for e in events
+        if e["safety"].get("pii_masked") or e["safety"].get("pii_redactions")
+    )
     safety_any = sum(1 for e in events if e["safety"]["events"])
 
     def lat(key: str, only_positive: bool = True) -> dict[str, float | None]:
@@ -89,8 +94,24 @@ def compute_metrics(
             "p50_total_ms": _pct(totals, 50),
         }
 
+    # Measured retrieval: only eval cases know which documents were expected.
+    ranks = [
+        (e.get("eval") or {}).get("rank")
+        for e in events
+        if (e.get("eval") or {}).get("expected_docs")
+    ]
+    ranks = [r for r in ranks if r is not None]
+    eval_retrieval = {
+        "n": len(ranks),
+        "hit_rate": _rate(sum(1 for r in ranks if r > 0), len(ranks)),
+        "mrr": round(float(np.mean([1 / r if 0 < r <= 5 else 0.0 for r in ranks])), 4)
+        if ranks
+        else None,
+    }
+
     return {
         "total_queries": total,
+        "eval_retrieval": eval_retrieval,
         "execution": {
             "http_ok": sum(1 for e in events if e["execution"]["http_status"] == 200),
             "stage_errors": sum(1 for e in events if e["errors"]),
@@ -125,7 +146,7 @@ def compute_metrics(
             "queries_with_events": safety_any,
             "query_injection": safety_query,
             "embedded_injection": safety_chunk,
-            "pii_redaction": safety_pii,
+            "pii_masked": safety_pii,
         },
         "latency_ms": {
             "retrieval": lat("retrieval_ms"),
@@ -162,6 +183,8 @@ def summarize_event(e: dict[str, Any]) -> dict[str, Any]:
         "query_id": e["identity"]["query_id"],
         "timestamp": e["identity"]["timestamp"],
         "session_id": e["identity"]["session_id"],
+        "user_id": e["identity"].get("user_id"),
+        "username": e["identity"].get("username"),
         "config_id": e["identity"]["config_id"],
         "query": e["question"]["original"],
         "route": e["question"]["route"],

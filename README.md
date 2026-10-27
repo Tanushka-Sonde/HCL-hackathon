@@ -1,13 +1,15 @@
 # Enterprise Knowledge Intelligence Assistant
 
-HCL Tech AI Engineer hackathon. This is a production-minded RAG assistant that does the following:
+HCL Tech AI Engineer hackathon. A production-minded RAG assistant that:
 
-- answers questions from approved documents (PDF, DOCX, TXT, MD) and a structured business dataset (SQL tool);
-- returns **grounded answers with validated citations**;
-- refuses unsupported, conflicting or malicious requests safely;
-- logs **every query** to an **observability and evaluation dashboard**.
+- answers questions from approved documents (PDF, DOCX, TXT, MD, scanned pages and photos of handwriting) and a structured business dataset (SQL tool);
+- returns **grounded answers with validated citations**, safe arithmetic over tables, and charts drawn only from cited values;
+- separates **users** (a full-window assistant) from **administrators** (knowledge base, observability, users, evaluation), enforced by the API;
+- masks personal data and salaries for users, while admins see raw data;
+- declines unsupported, conflicting or malicious requests safely;
+- logs **every query** to an **observability and evaluation dashboard**, with per-user activity and unusual-activity rules.
 
-It is built on the existing [`ai_research_platform`](README.original.md) codebase: FastAPI + Next.js, hybrid dense/sparse retrieval with Reciprocal Rank Fusion, and the Groq generation path. The new code adds a self-contained **local demo mode** that needs no PostgreSQL, MinIO, Redis or Google OAuth.
+It is built on the existing [`ai_research_platform`](README.original.md) codebase: FastAPI + Next.js, hybrid dense/sparse retrieval with Reciprocal Rank Fusion, and Groq for generation and vision. The **local demo mode** needs no PostgreSQL, MinIO, Redis or Google OAuth.
 
 > All documents, people and figures in `demo/` are **synthetic** (a fictional company, "Orion Synthetic Industries").
 
@@ -15,7 +17,7 @@ It is built on the existing [`ai_research_platform`](README.original.md) codebas
 
 ## Quick start (Windows / macOS / Linux)
 
-Prerequisites: Python 3.11+ and Node.js 20+.
+Prerequisites: Python 3.11+ and Node.js 20.9+.
 
 ```bash
 # 1. Backend
@@ -23,10 +25,12 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate      macOS/Linux: source .venv/bin/activate
 pip install -r requirements-demo.txt     # see note on torch below
 cp .env.example .env                     # Windows: copy .env.example .env
-#   then set GROQ_API_KEY=... in .env (free key: https://console.groq.com)
+#   set GROQ_API_KEY=... (free key: https://console.groq.com)
+#   set JWT_SECRET_KEY to a long random value:
+#     python -c "import secrets; print(secrets.token_hex(32))"
 
-python scripts/build_demo.py             # builds demo PDF/DOCX + data/business.db
-python scripts/seed_demo.py              # indexes the demo corpus
+python scripts/build_demo.py             # demo PDFs/DOCX/images + data/business.db
+python scripts/seed_demo.py              # demo accounts + indexes the corpus
 uvicorn src.main:app --port 8000         # API on http://localhost:8000/docs
 
 # 2. Frontend (second terminal)
@@ -35,82 +39,89 @@ npm install
 npm run dev                              # UI on http://localhost:3000
 ```
 
-Open **http://localhost:3000**. The UI proxies `/api/v1/*` to the backend on port 8000. To point it elsewhere, set `BACKEND_URL`.
+Open **http://localhost:3000** and sign in:
 
-**Embeddings note:** `sentence-transformers` pulls in PyTorch. On a slow network, install the CPU wheel first with `pip install torch --index-url https://download.pytorch.org/whl/cpu`. If the model cannot be loaded or downloaded, the backend falls back automatically to a deterministic **hashing embedder** and a **lexical reranker**. The active choice is shown on the Knowledge Base page and recorded in every query event (`config_label`).
+| Account | Password | Role | Sees |
+|---|---|---|---|
+| `admin` | `admin123` | admin | Assistant, Knowledge Base, Observability, Users, Evaluation |
+| `alice`, `bob` | `user123` | user | A full-window assistant and *My history* only |
 
-**LLM note:** without `GROQ_API_KEY`, answers use a deterministic **extractive** generator, which still produces citations. Those queries are honestly marked `Partial / LLM_FALLBACK`.
+There is one sign-in form; the account decides the role. Admins can create more users on the **Users** page. The UI hides admin pages from users, but the security boundary is the API: every admin endpoint returns **403** to a user token (and the attempt is logged).
+
+The UI proxies `/api/v1/*` to the backend on port 8000 (set `BACKEND_URL` to change it).
+
+**Without a Groq key** the app still works: answers come from a deterministic **extractive** generator (marked `Partial / LLM_FALLBACK`), and scanned pages, photos and chart images are skipped with a clear message because they need the vision model.
+
+**Embeddings note:** `sentence-transformers` pulls in PyTorch. On a slow network, install the CPU wheel first (`pip install torch --index-url https://download.pytorch.org/whl/cpu`). If the model cannot load, the backend falls back to a deterministic **hashing embedder** and **lexical reranker**; the active choice is shown on the Knowledge Base page and recorded in every query event.
 
 ## What is implemented
 
-| Brief requirement | Status | Where |
+| Requirement | Status | Where |
 |---|---|---|
-| FR-01 Document intake: type, size, empty or corrupt checks | ✅ | `src/knowledge/parsing.py` |
-| FR-02 Text extraction with page, section, category, version and status metadata | ✅ PDF (per page), DOCX (headings and tables), TXT, MD | `parsing.py` |
-| Scanned / handwritten documents | ⚠️ Detected and **rejected with an explicit "OCR not enabled" message**. OCR is not implemented. | `parsing.py` |
-| FR-03 Configurable chunking, embeddings, repeatable indexing (content-hash dedup) | ✅ | `service.py`, `embeddings.py` |
-| FR-04 Hybrid retrieval: vector + BM25, fused with RRF (reuses `src/retrieval/service.py::_reciprocal_rank_fusion`) | ✅ | `retrieval.py` |
-| FR-05 Reranking: cross-encoder `ms-marco-MiniLM-L-6-v2`, or a documented lexical scorer | ✅ | `embeddings.py` |
-| Metadata filters (category, status) | ✅ (API) | `retrieval.py` |
-| FR-06 Multi-turn context: last 3 turns only, follow-up rewrite, selected turns logged | ✅ | `context.py` |
-| FR-07 Tool routing: docs / SQL / both | ✅ rule-based and explainable | `router.py` |
-| SQL tool: allowlisted parameterised templates, read-only connection | ✅ | `tools.py` |
-| FR-08 Grounded generation with `[S1]`/`[T1]` citations | ✅ Groq, plus an extractive fallback | `generation.py` |
-| Citation validation and claim-level grounding score | ✅ | `validation.py` |
-| FR-09 Conflict handling (two versions of one policy) | ✅ surfaced in the answer and the trace | `validation.py` |
+| FR-01 Intake: type, 20 MB size, empty/corrupt, magic bytes, renamed executables, metadata form fields | ✅ | `src/knowledge/parsing.py` |
+| FR-02 Extraction with page, section, category, version, status; tables kept in reading order | ✅ PDF (PyMuPDF), DOCX (body order), TXT, MD | `parsing.py` |
+| Scanned PDFs and handwritten/photographed notes | ✅ with `GROQ_API_KEY` (Groq vision OCR; page image kept as an asset). ⚠️ Without a key they are skipped with a message | `vision.py`, `parsing.py` |
+| Charts inside PDFs | ✅ with a key: chart → text summary + data table chunk, original image returned when cited | `parsing.py`, `visuals.py` |
+| FR-03 Configurable chunking; a table is one chunk (split by rows with the header repeated) | ✅ | `service.py` |
+| FR-04 Hybrid retrieval: vector + BM25 + RRF; `doc_id`/`version`/`category`/`status` filters | ✅ | `retrieval.py` |
+| FR-05 Reranking: cross-encoder `ms-marco-MiniLM-L-6-v2` (or lexical fallback) | ✅ | `embeddings.py` |
+| FR-06 Multi-turn: last 3 turns, strict follow-up detection, LLM rewrite when a key is set | ✅ (context-leak bug from the audit fixed and tested) | `context.py` |
+| FR-07 Tool routing: docs / SQL / both, rule-based; allowlisted, parameterised, read-only SQL | ✅ (project **IDs** only, see limitations) | `router.py`, `tools.py` |
+| FR-08 Grounded generation with `[S#]`/`[T#]`/`[U1]` citations; safe `{{calc: …}}` arithmetic | ✅ | `generation.py`, `calc.py`, `validation.py` |
+| FR-09 Conflicts between versions (incl. a draft v3.0) | ✅ | `validation.py` |
 | FR-10 Insufficient-evidence and controlled-error fallbacks | ✅ | `service.py`, `outcome.py` |
-| Prompt-injection detection: in the query (blocked) and in documents (stripped, logged) | ✅ | `safety.py` |
-| PII redaction on output | ✅ regex-based | `safety.py` |
-| FR-11 Helpful / not-helpful feedback with comment | ✅ | `/kis/feedback` |
-| FR-12 Dashboard: aggregate KPIs plus per-query drill-down | ✅ | `frontend/src/app/observability` |
-| Evaluation set and A/B configuration comparison report | ✅ 16 cases | `demo/eval/eval_set.json`, `reports/evaluation_report.md` |
-| Automated tests | ✅ 36 tests, offline | `tests_knowledge/` |
-| Container | ⚠️ `docker/Dockerfile.demo` written but **not tested** (no Docker on the dev machine) | `docker/` |
+| FR-11 Feedback (helpful / not helpful + comment), only on your own answers | ✅ | `/kis/feedback` |
+| FR-12 Dashboard: KPIs, charts, anomalies, per-user filter, per-query drill-down with the prompt sent | ✅ | `frontend/src/app/observability` |
+| Login with admin/user roles (JWT, bcrypt), sessions owned by one user | ✅ | `auth.py`, `routes.py` |
+| Masking of personal data and salaries for users (admins see raw) | ✅ | `masking.py` |
+| Per-user history, sessions, tokens; unusual-activity rules | ✅ | `anomaly.py`, `/kis/admin/*`, `/kis/my/*` |
+| Token budgets (input/output limits, per-stage accounting, truncation flags) | ✅ | `generation.py`, `service.py` |
+| Image as query input | ✅ with a key | `/kis/query/multimodal` |
+| Prompt-injection: question blocked; instructions in documents/images stripped and logged | ✅ | `safety.py` |
+| Evaluation: 40 cases, configs A/B/C, hit@1, MRR@5, optional LLM judge | ✅ | `evaluation.py`, `demo/eval/eval_set.json` |
+| Automated tests | ✅ 162 tests, offline | `tests_knowledge/` |
+| Containers | ⚠️ `docker-compose.demo.yml` written but **not built** (no Docker on the dev machine) | `docker/` |
 
-**Simulated or limited, and labelled as such:**
-- The `vendor_invoices` SQL template targets a table that does not exist **on purpose**, to demonstrate the tool-failure path. The UI marks it "simulated failure".
-- Demo mode has no user accounts. The header shows **"Local demo mode"**. The original OAuth, tenant and PostgreSQL routers are untouched and are used when `DEMO_MODE=false`.
-- The cost KPI is an estimate from configured per-1K-token prices.
+## Demo script (about 5 minutes)
 
-## Demo script (about 3 minutes)
-
-1. **Knowledge Base**: click **Load demo corpus**. It indexes 6 synthetic docs: a PDF, a DOCX, MD and TXT files, and a superseded policy version. Optionally upload `demo/samples/scanned_receipt_no_text.pdf` or `corrupted_file.pdf` to show validation rejecting them.
-2. **Assistant** (config B):
-   - *"What is the standard document retention period for business records?"* gives the v2.0 answer (7 years) with a **conflict banner** naming v1.0 (5 years, superseded).
-   - *"Who must approve ACR-3310?"* is an exact-ID lookup via BM25. Click the `[S1]` chip to see the source section.
-   - *"What is the PDA for international travel?"* matches an acronym and cites the PDF **page 2**.
-   - Follow up with *"What is the per diem allowance for domestic travel?"*, then *"And what about international trips?"*. This shows context resolution.
-   - *"What is the remaining budget of PRJ-1002 and does a USD 20,000 purchase on it need CFO approval?"* is **combined** SQL `[T1]` + procurement SOP `[S1]`.
-   - *"What is the parental leave entitlement?"* falls back honestly to insufficient evidence.
-   - *"What are the deployment steps for Project Atlas?"* hits a document with an **embedded injection**. The injection is ignored and logged.
-   - *"Show the vendor invoices for PRJ-1001."* is a **tool failure**: controlled error, outcome *Failed*.
-   - Give 👍 / 👎 feedback with a comment.
-3. **Observability**: show the KPIs, outcome distribution, reason codes and recent-queries table. Click a row for the **full trace**: router decision, retrieval scores (vector, BM25, fused, rerank), citations, grounding, safety, stage latencies, tokens and cost, and feedback.
-4. Click **Run evaluation set**. It compares config A (vector only) with B (hybrid + rerank) over the 16 cases and writes `reports/evaluation_report.md`.
+1. **Sign in as `admin`.** On **Knowledge Base**, click **Load demo corpus** (19 synthetic documents). Upload `demo/samples/corrupted_file.pdf` (rejected with a reason) and, with a Groq key, `demo/samples/handwritten_ops_note.jpg` (accepted, read by OCR).
+2. **Assistant** — use **Try a scenario**:
+   - *Conflict*: retention period → v2.0 (7 years) with a banner naming the other versions of HR-POL-007.
+   - *Exact ID*: "Who must approve ACR-3310?" → CISO; click `[S1]` to see the highlighted sentence.
+   - *SQL + policy*: PRJ-1002 remaining budget plus CFO approval → `[T1]` table + `[S1]`.
+   - *Table maths* (needs a key): total profit of the last 5 months → `228,000 (= 37,000+…)`.
+   - *Chart*: "Plot the monthly profit…" → a line chart built only from the cited table.
+   - *Injection*, *No evidence*, *Tool failure*: safe behaviour, each explained in one status line.
+3. **Sign in as `alice`** in another window: the full-window assistant only. Ask *Personal data* ("annual salary and email of Tom Becker") → `[SALARY]`, `[EMAIL]`. Ask the same as admin → raw values. Try opening `/observability` as alice → redirected; the API returns 403.
+4. **Observability** (admin): KPIs, latency and A/B charts, unusual activity (alice's 403s appear as `FORBIDDEN_ACCESS`), filter by user, open a trace: outcome summary, stage timeline, scores per chunk, citations, grounding, masking, the prompt sent.
+5. **Users**: per-user tokens and sessions → open a transcript. **Evaluation**: run A/B/C and read the per-case table.
 
 ## API (`/api/v1/kis`, Swagger at `/docs`)
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/health`, `/health/ready` | Liveness; readiness (store, business DB, models) |
-| GET | `/kis/config` | Active embedder, reranker, LLM and configs |
-| POST | `/kis/ingest` | Upload and index a document (multipart `file`) |
-| POST | `/kis/ingest/demo` | Index `demo/corpus/*` |
-| GET / DELETE | `/kis/documents[/{id}]` | List or remove documents |
-| POST | `/kis/query` | `{query, session_id?, config_id: "A"\|"B", top_k?, category?, status?}` |
-| POST | `/kis/feedback` | `{query_id, helpful, comment?}` |
-| GET | `/kis/metrics` | Aggregate KPIs (`config_id`, `outcome`, `since_hours`, `include_eval` filters) |
-| GET | `/kis/queries[/{id}]` | Recent query summaries, or the full per-query event |
-| POST / GET | `/kis/eval/run`, `/kis/eval/status` | Run the A/B evaluation in the background, then poll |
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| POST | `/auth/login` | public | Username + password → JWT |
+| GET | `/auth/me` | any | Current user (never a password field) |
+| GET | `/config` | any | Active embedder, reranker, LLM, vision, limits |
+| POST | `/query` | any | `{query, session_id?, config_id A\|B\|C, top_k?, category?, status?, doc_id?, version?, max_input_tokens?, max_output_tokens?}` |
+| POST | `/query/multimodal` | any | Multipart: `image` (png/jpg/webp ≤ 10 MB) + optional `query` |
+| POST | `/feedback` | any | `{query_id, helpful, comment?}` (own answers only) |
+| GET | `/assets/{id}` | any | Original chart / page / photo image for a citation |
+| GET | `/my/sessions`, `/my/history` | any | Own conversations (masked for users) and token use |
+| POST | `/ingest`, `/ingest/demo` | admin | Upload (multipart `file` + optional `category`, `version`, `status`, `effective_date`) / index the demo corpus |
+| GET / DELETE | `/documents[/{id}]`, `/documents/{id}/chunks` | admin | List, remove, view chunks |
+| GET | `/metrics`, `/queries[/{id}]` | admin | KPIs and events (filters incl. `user_id`) |
+| GET / POST | `/admin/users`, `/admin/users/summary`, `/admin/users/{id}/sessions`, `/admin/sessions/{id}`, `/admin/anomalies` | admin | Users, activity, transcripts, unusual activity |
+| POST / GET | `/eval/run`, `/eval/status` | admin | Run the A/B/C evaluation; latest result survives restarts |
 
-Every response carries an `X-Request-ID` header, which is stored as the query's correlation ID.
+Every response carries an `X-Request-ID` header, stored as the query's correlation ID.
 
 ## Tests & quality
 
 ```bash
-python -m pytest tests_knowledge -q      # 36 tests, offline (hashing embedder, extractive generator)
+python -m pytest tests_knowledge -q      # 162 tests, offline (fake vision, stubbed LLM where needed)
 ruff check src/knowledge tests_knowledge scripts
-python scripts/run_eval.py               # A/B report -> reports/evaluation_report.md
+python scripts/run_eval.py               # A/B/C report -> reports/evaluation_report.md
 cd frontend && npx tsc --noEmit && npm run build
 ```
 
@@ -118,29 +129,41 @@ cd frontend && npx tsc --noEmit && npm run build
 
 ## Docs
 
+- [docs/HLD.md](docs/HLD.md): high-level design
 - [docs/architecture.md](docs/architecture.md): architecture diagram and design decisions
 - [docs/query_event_schema.md](docs/query_event_schema.md): query event schema and the Success / Partial / Failed rules
 - [reports/evaluation_report.md](reports/evaluation_report.md): latest configuration comparison
-- [README.original.md](README.original.md): the original platform (production path)
+- [README.original.md](README.original.md): the original platform (production path, `DEMO_MODE=false`)
 
 ## Environment variables
 
-See [.env.example](.env.example). The key ones:
+All are listed with comments in [.env.example](.env.example). The main ones:
 
-- `DEMO_MODE` (default `true`)
-- `GROQ_API_KEY`, `GROQ_MODEL_NAME`
-- `KIS_EMBEDDER`, `KIS_RERANKER`
-- `KIS_CHUNK_SIZE`, `KIS_CHUNK_OVERLAP`
-- `KIS_MIN_EVIDENCE_SCORE`, `KIS_GROUNDING_THRESHOLD`
+- `DEMO_MODE` (default `true`), `JWT_SECRET_KEY` (set it; otherwise a random per-process secret is used and logins end on restart), `KIS_TOKEN_EXPIRE_MINUTES`
+- `GROQ_API_KEY`, `GROQ_MODEL_NAME` (default `llama-3.3-70b-versatile`), `GROQ_VISION_MODEL` (default `meta-llama/llama-4-scout-17b-16e-instruct`)
+- `KIS_EMBEDDER`, `KIS_RERANKER`, `KIS_CHUNK_SIZE`, `KIS_CHUNK_OVERLAP`, `KIS_TABLE_CHUNK_MAX_CHARS`
+- `KIS_MAX_UPLOAD_MB` (20), `KIS_VISION_ENABLED`, `KIS_VISION_MAX_PAGES`, `KIS_QUERY_IMAGE_MAX_MB`, `KIS_STORE_QUERY_IMAGES`
+- `KIS_MIN_EVIDENCE_SCORE`, `KIS_GROUNDING_THRESHOLD`, `KIS_MAX_INPUT_TOKENS_CAP`, `KIS_MAX_OUTPUT_TOKENS_CAP`
+- `KIS_ANOMALY_*`, `KIS_USER_DAILY_TOKEN_CAP`, `KIS_OFF_HOURS_START/END`
 - `LLM_PRICE_INPUT_PER_1K`, `LLM_PRICE_OUTPUT_PER_1K`
 
-Frontend:
-- `BACKEND_URL` (default `http://127.0.0.1:8000`)
-- `NEXT_PUBLIC_DEMO_MODE` (default on; set `false` for the OAuth flow)
+Frontend: `BACKEND_URL` (default `http://127.0.0.1:8000`, read at build time), `NEXT_PUBLIC_DEMO_MODE` (default on).
+
+## Docker (untested)
+
+```bash
+JWT_SECRET_KEY=$(python -c "import secrets; print(secrets.token_hex(32))") \
+GROQ_API_KEY=... docker compose -f docker-compose.demo.yml up --build
+```
+
+Backend and frontend run as two services; data lives in the `kis-data` volume and is seeded on start-up. **This has not been built**: Docker was not available on the development machine.
 
 ## Known limitations
 
-- No OCR: scanned or handwritten PDFs are rejected with a clear message.
-- Routing and grounding are rule-based. They are deterministic and explainable, but not semantic.
-- The index lives in memory (rebuilt from SQLite at startup), which is fine for demo-scale corpora.
-- Conversation memory is per process. Evaluation runs are in-process background tasks.
+- **The Groq paths were not run against the live API on the dev machine** (no key there): LLM generation, `{{calc}}`, model charts, follow-up rewrites, vision OCR, chart reading and image questions are covered by tests with a stubbed LLM and a fake vision client. Run the demo questions with a key before presenting, and check that `GROQ_MODEL_NAME` / `GROQ_VISION_MODEL` are still served by Groq.
+- **SQL tool resolves project IDs only.** "How much has been spent on Project Atlas?" does not reach SQL (a team decision kept the tool unchanged; it is an eval case that fails on purpose).
+- Routing and grounding are rule-based: explainable, but not semantic. Two paraphrase eval cases fall below the evidence threshold even with the semantic embedder.
+- Person names are not masked (that would need NER); masking is pattern-based.
+- The JWT is kept in `localStorage` (as the existing client did); an httpOnly cookie would be safer against XSS.
+- The index lives in memory (rebuilt from SQLite at start-up). Conversation memory is per process, so a restart drops follow-up context.
+- Without a key, the cost KPI is zero; with a key it is an estimate from configured prices.

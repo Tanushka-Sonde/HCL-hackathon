@@ -57,7 +57,8 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     tavily_api_key: str = ""
     groq_api_key: str = ""
-    groq_model_name: str = "llama-3.1-8b-instant"
+    groq_model_name: str = "llama-3.3-70b-versatile"
+    groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     # ── LLM Gateway ──────────────────────────────────────────
     llm_model_name: str = "models/gemini-2.0-flash"
@@ -89,7 +90,7 @@ class Settings(BaseSettings):
     # hybrid retrieval) without PostgreSQL, MinIO, Redis or Google OAuth.
     demo_mode: bool = True
     kis_data_dir: str = "data"
-    kis_max_upload_mb: int = 10
+    kis_max_upload_mb: int = 20
     kis_chunk_size: int = 800
     kis_chunk_overlap: int = 120
     kis_embedder: str = "sentence-transformers"  # or "hashing"
@@ -98,9 +99,27 @@ class Settings(BaseSettings):
     kis_min_evidence_score: float = 0.6
     kis_grounding_threshold: float = 0.7
     kis_context_turns: int = 3
+    kis_token_expire_minutes: int = 480  # demo-mode login lifetime
+    kis_vision_enabled: bool = True
+    kis_vision_max_pages: int = 30  # vision calls per document
+    kis_table_chunk_max_chars: int = 4000
+    kis_max_input_tokens_cap: int = 8000
+    kis_max_output_tokens_cap: int = 1500
+    kis_query_image_max_mb: int = 10
+    kis_store_query_images: bool = False  # keep raw images attached to questions
+    # Unusual-activity rules (admin Users / Observability pages)
+    kis_user_daily_token_cap: int = 200_000
+    kis_anomaly_burst_per_5min: int = 20
+    kis_anomaly_injection_per_24h: int = 2
+    kis_anomaly_pii_per_24h: int = 3
+    kis_anomaly_failed_logins_10min: int = 5
+    kis_anomaly_forbidden_per_24h: int = 3
+    kis_anomaly_token_spike_factor: float = 3.0
+    kis_off_hours_start: int = 0  # local hour, inclusive
+    kis_off_hours_end: int = 5  # local hour, exclusive
     llm_price_input_per_1k: float = 0.00005
     llm_price_output_per_1k: float = 0.00008
-    prompt_template_version: str = "kis-grounded-v1"
+    prompt_template_version: str = "kis-grounded-v2"  # v2 adds {{calc: ...}}
 
     # ── Server ────────────────────────────────────────────────
     app_name: str = "AI Research Platform"

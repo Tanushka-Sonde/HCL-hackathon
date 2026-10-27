@@ -1,0 +1,9 @@
+# Keep binary demo files byte-exact (core.autocrlf would corrupt them on Windows).
+*.pdf  binary
+*.docx binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.db   binary
+*.ico  binary

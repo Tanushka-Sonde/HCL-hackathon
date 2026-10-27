@@ -1,7 +1,7 @@
 [project]
-name = "ai-research-platform"
+name = "enterprise-knowledge-assistant"
 version = "0.1.0"
-description = "Multi-tenant AI Research Platform with hybrid retrieval (pgvector + tsvector)"
+description = "Enterprise Knowledge Intelligence Assistant: grounded RAG with citations, roles and query observability (built on the AI Research Platform)"
 requires-python = ">=3.11"
 
 [tool.ruff]

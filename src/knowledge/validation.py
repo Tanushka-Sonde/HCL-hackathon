@@ -16,11 +16,15 @@ from src.knowledge.generation import INSUFFICIENT_ANSWER
 from src.knowledge.schemas import Citation, Evidence, ToolCall
 from src.knowledge.text import content_tokens, numbers_in, split_sentences
 
-CITATION_RE = re.compile(r"\[((?:S|T)\d+)\]")
+# S = document evidence, T = tool result, U = the image attached to the question
+CITATION_RE = re.compile(r"\[((?:S|T|U)\d+)\]")
+USER_IMAGE_ID = "U1"
 _TOKEN_SUPPORT = 0.5
 
 
-def _source_texts(evidence: list[Evidence], tools: list[ToolCall]) -> dict[str, str]:
+def _source_texts(
+    evidence: list[Evidence], tools: list[ToolCall], user_image: str | None = None
+) -> dict[str, str]:
     texts = {
         ev.source_id: f"{ev.title} {ev.doc_id} version {ev.version} {ev.status} {ev.section or ''} {ev.content}"
         for ev in evidence
@@ -30,11 +34,16 @@ def _source_texts(evidence: list[Evidence], tools: list[ToolCall]) -> dict[str, 
             texts[tc.source_id] = (
                 json.dumps(tc.rows, default=str) + " " + json.dumps(tc.params)
             )
+    if user_image:
+        texts[USER_IMAGE_ID] = user_image
     return texts
 
 
 def validate_citations(
-    answer: str, evidence: list[Evidence], tools: list[ToolCall]
+    answer: str,
+    evidence: list[Evidence],
+    tools: list[ToolCall],
+    user_image: str | None = None,
 ) -> list[Citation]:
     """Every distinct citation tag, and whether it maps to returned evidence."""
     by_id = {ev.source_id: ev for ev in evidence}
@@ -61,37 +70,86 @@ def validate_citations(
                     target=f"{tc.name}:{tc.template} {tc.params}",
                 )
             )
+        elif sid == USER_IMAGE_ID and user_image:
+            citations.append(
+                Citation(
+                    source_id=sid, valid=True, target="image attached to the question"
+                )
+            )
         else:
             citations.append(Citation(source_id=sid, valid=False, target=None))
     return citations
+
+
+def _sentences_with_tags(answer: str) -> list[tuple[str, list[str]]]:
+    """Each sentence with the citation tags that cover it.
+
+    A sentence without its own tag is covered by the next tag in the same
+    paragraph ("Fact one. Fact two [S1]." -> both cite S1). A tag never
+    reaches back across a paragraph break.
+    """
+    out: list[tuple[str, list[str]]] = []
+    for paragraph in answer.split("\n"):
+        sentences = split_sentences(paragraph)
+        tags = [CITATION_RE.findall(s) for s in sentences]
+        for i, sentence in enumerate(sentences):
+            covering = tags[i] or next((t for t in tags[i + 1 :] if t), [])
+            out.append((sentence, covering))
+    return out
 
 
 def is_insufficient(answer: str) -> bool:
     return INSUFFICIENT_ANSWER.lower().rstrip(".") in answer.lower()
 
 
+def _calc_results(
+    calculations: list[dict[str, Any]] | None,
+) -> list[tuple[str, set[str]]]:
+    """(result, operands) for each successful calculation, numbers normalized."""
+    out = []
+    for calc in calculations or []:
+        if calc.get("result") is not None:
+            out.append((calc["result"].replace(",", ""), numbers_in(calc["expr"])))
+    return out
+
+
 def assess_grounding(
-    answer: str, evidence: list[Evidence], tools: list[ToolCall]
+    answer: str,
+    evidence: list[Evidence],
+    tools: list[ToolCall],
+    calculations: list[dict[str, Any]] | None = None,
+    question: str | None = None,
+    user_image: str | None = None,
 ) -> dict[str, Any]:
-    """Classify each answer sentence as supported or potentially unsupported."""
-    texts = _source_texts(evidence, tools)
+    """Classify each answer sentence as supported or potentially unsupported.
+
+    A computed number (from a ``{{calc: ...}}`` expression) counts as present
+    in the source when every operand of its expression is in the cited source.
+    Numbers the user gave in the question ("the last 5 months") are not claims.
+    A paragraph's trailing citation also covers the sentences before it.
+    """
+    texts = _source_texts(evidence, tools, user_image)
+    calcs = _calc_results(calculations)
+    given = numbers_in(question or "")
     supported: list[str] = []
     unsupported: list[dict[str, str]] = []
-    for sentence in split_sentences(answer):
+    for sentence, tags in _sentences_with_tags(answer):
         if sentence.startswith("Note:") or is_insufficient(sentence):
             continue
         bare = CITATION_RE.sub("", sentence)
         tokens = set(content_tokens(bare))
         if not tokens:
             continue
-        cited = [sid for sid in CITATION_RE.findall(sentence) if sid in texts]
+        cited = [sid for sid in tags if sid in texts]
         if not cited:
             unsupported.append({"claim": sentence, "reason": "no valid citation"})
             continue
         source = " ".join(texts[sid] for sid in cited)
         source_tokens = set(content_tokens(source))
         overlap = len(tokens & source_tokens) / len(tokens)
-        missing_numbers = numbers_in(bare) - numbers_in(source)
+        source_numbers = numbers_in(source)
+        derived = {result for result, operands in calcs if operands <= source_numbers}
+        missing_numbers = numbers_in(bare) - source_numbers - derived - given
         if overlap < _TOKEN_SUPPORT:
             unsupported.append(
                 {
@@ -114,7 +172,11 @@ def assess_grounding(
         "claims": total,
         "supported": supported,
         "unsupported": unsupported,
-        "rule": "cited + >=50% token overlap + all numbers present in cited source",
+        "rule": (
+            "cited + >=50% token overlap + all numbers present in cited source "
+            "(or computed by a calc whose operands are all in the source, "
+            "or stated by the user in the question)"
+        ),
     }
 
 

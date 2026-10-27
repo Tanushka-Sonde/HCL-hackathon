@@ -22,6 +22,8 @@ import numpy as np
 from src.knowledge.text import content_tokens, keyword_tokens
 from src.retrieval.service import _reciprocal_rank_fusion
 
+IDF_MIN_CHUNKS = 30
+
 
 class BM25Index:
     """Okapi BM25 over tokenized chunk text (k1=1.5, b=0.75)."""
@@ -40,6 +42,11 @@ class BM25Index:
             term: math.log(1 + (n - freq + 0.5) / (freq + 0.5))
             for term, freq in df.items()
         }
+        # A term that appears nowhere is maximally informative.
+        self._max_idf = math.log(1 + (n + 0.5) / 0.5) if n else 1.0
+
+    def idf(self, term: str) -> float:
+        return self._idf.get(term, self._max_idf)
 
     def scores(self, query_tokens: list[str]) -> list[float]:
         result = []
@@ -88,19 +95,26 @@ class KnowledgeIndex:
     def __init__(self, embedder: Any, is_semantic: bool) -> None:
         self._embedder = embedder
         self._is_semantic = is_semantic
-        self.chunks: list[dict[str, Any]] = []
-        self._matrix = np.zeros((0, 1), dtype=np.float32)
-        self._bm25 = BM25Index([])
+        self._state: tuple[list[dict[str, Any]], np.ndarray, BM25Index] = (
+            [],
+            np.zeros((0, 1), dtype=np.float32),
+            BM25Index([]),
+        )
 
     def rebuild(self, chunks: list[dict[str, Any]]) -> None:
-        self.chunks = chunks
-        if chunks:
-            self._matrix = np.asarray(
-                [c["embedding"] for c in chunks], dtype=np.float32
-            )
-        else:
-            self._matrix = np.zeros((0, 1), dtype=np.float32)
-        self._bm25 = BM25Index([keyword_tokens(c["index_text"]) for c in chunks])
+        # Build everything first, then swap in one assignment, so a concurrent
+        # search never sees chunks, matrix and BM25 from different versions.
+        matrix = (
+            np.asarray([c["embedding"] for c in chunks], dtype=np.float32)
+            if chunks
+            else np.zeros((0, 1), dtype=np.float32)
+        )
+        bm25 = BM25Index([keyword_tokens(c["index_text"]) for c in chunks])
+        self._state = (chunks, matrix, bm25)
+
+    @property
+    def chunks(self) -> list[dict[str, Any]]:
+        return self._state[0]
 
     def __len__(self) -> int:
         return len(self.chunks)
@@ -115,52 +129,57 @@ class KnowledgeIndex:
         min_relevance: float,
         category: str | None = None,
         status: str | None = None,
+        doc_id: str | None = None,
+        version: str | None = None,
         candidate_pool: int = 20,
     ) -> RetrievalResult:
         """Run configuration A or B and return scored candidates."""
+        chunks, matrix, bm25 = self._state  # one consistent snapshot
         allowed = [
             i
-            for i, c in enumerate(self.chunks)
+            for i, c in enumerate(chunks)
             if (not category or (c.get("category") or "").lower() == category.lower())
             and (not status or (c.get("status") or "").lower() == status.lower())
+            and (not doc_id or (c.get("doc_id") or "").lower() == doc_id.lower())
+            and (not version or (c.get("version") or "") == version)
         ]
         if not allowed:
             return RetrievalResult()
 
         # Dense retrieval
         q_vec = np.asarray(self._embedder.encode([query])[0], dtype=np.float32)
-        sims = self._matrix[allowed] @ q_vec
+        sims = matrix[allowed] @ q_vec
         dense_order = np.argsort(-sims)[:candidate_pool]
         dense = [(allowed[j], float(sims[j])) for j in dense_order]
 
         cands: dict[int, Candidate] = {}
         for rank, (idx, score) in enumerate(dense, start=1):
             cands[idx] = Candidate(
-                self.chunks[idx], vector_score=round(score, 6), vector_rank=rank
+                chunks[idx], vector_score=round(score, 6), vector_rank=rank
             )
 
         if config_id == "A":
             ordered = [idx for idx, _ in dense]
         else:
             # Sparse retrieval (BM25)
-            bm25_all = self._bm25.scores(keyword_tokens(query))
+            bm25_all = bm25.scores(keyword_tokens(query))
             sparse = sorted(
                 ((i, bm25_all[i]) for i in allowed if bm25_all[i] > 0),
                 key=lambda x: x[1],
                 reverse=True,
             )[:candidate_pool]
             for rank, (idx, score) in enumerate(sparse, start=1):
-                cand = cands.setdefault(idx, Candidate(self.chunks[idx]))
+                cand = cands.setdefault(idx, Candidate(chunks[idx]))
                 cand.bm25_score = round(score, 6)
                 cand.bm25_rank = rank
 
             # Reciprocal Rank Fusion (shared with the PostgreSQL retrieval path)
             fused = _reciprocal_rank_fusion(
-                [self._rrf_row(i) for i, _ in dense],
-                [self._rrf_row(i) for i, _ in sparse],
+                [_rrf_row(chunks[i]) for i, _ in dense],
+                [_rrf_row(chunks[i]) for i, _ in sparse],
                 top_k=candidate_pool,
             )
-            id_to_idx = {c["chunk_id"]: i for i, c in enumerate(self.chunks)}
+            id_to_idx = {c["chunk_id"]: i for i, c in enumerate(chunks)}
             ordered = []
             for rank, item in enumerate(fused, start=1):
                 idx = id_to_idx[str(item.chunk_id)]
@@ -168,14 +187,20 @@ class KnowledgeIndex:
                 cands[idx].fused_rank = rank
                 ordered.append(idx)
 
-        # Relevance signals used for the insufficient-evidence decision
+        # Relevance signal for the insufficient-evidence decision: query-term
+        # coverage weighted by IDF, so a missing rare word ("parental") counts
+        # far more than a word found in most chunks ("policy").
+        # IDF is meaningless on a tiny index (2-3 chunks), so small indexes use
+        # plain coverage. 1 + IDF keeps common words worth something.
         q_tokens = set(content_tokens(query))
+        weighted = len(chunks) >= IDF_MIN_CHUNKS
+        weights = {t: (1 + bm25.idf(t)) if weighted else 1.0 for t in q_tokens}
+        total_weight = sum(weights.values())
         for idx in ordered:
             cand = cands[idx]
             p_tokens = set(content_tokens(cand.chunk["index_text"]))
-            cand.coverage = (
-                round(len(q_tokens & p_tokens) / len(q_tokens), 6) if q_tokens else 0.0
-            )
+            matched = sum(weights[t] for t in q_tokens & p_tokens)
+            cand.coverage = round(matched / total_weight, 6) if total_weight else 0.0
 
         if config_id == "B":
             pool = ordered[: max(top_k * 2, 10)]
@@ -218,14 +243,14 @@ class KnowledgeIndex:
             evidence_found=top_rel >= min_relevance,
         )
 
-    def _rrf_row(self, idx: int) -> dict[str, Any]:
-        """Row shape expected by ``_reciprocal_rank_fusion``."""
-        c = self.chunks[idx]
-        return {
-            "chunk_id": uuid.UUID(c["chunk_id"]),
-            "document_id": uuid.UUID(c["document_id"]),
-            "content": c["content"],
-            "chunk_index": c["chunk_index"],
-            "page_number": c.get("page"),
-            "document_filename": c["document_filename"],
-        }
+
+def _rrf_row(c: dict[str, Any]) -> dict[str, Any]:
+    """Row shape expected by ``_reciprocal_rank_fusion``."""
+    return {
+        "chunk_id": uuid.UUID(c["chunk_id"]),
+        "document_id": uuid.UUID(c["document_id"]),
+        "content": c["content"],
+        "chunk_index": c["chunk_index"],
+        "page_number": c.get("page"),
+        "document_filename": c["document_filename"],
+    }

@@ -219,7 +219,10 @@ class SQLTool:
                 status="error",
                 latency_ms=round(latency, 2),
                 result_summary="tool execution failed",
-                error=f"{type(exc).__name__}: {exc}",
+                # Plain message for the user; the raw driver error stays in the
+                # stored event (error_detail) and is stripped from API responses.
+                error="The business data source could not be queried.",
+                error_detail=f"{type(exc).__name__}: {exc}",
                 simulated_failure=template.simulated_failure,
             )
 

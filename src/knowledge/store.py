@@ -64,7 +64,82 @@ CREATE TABLE IF NOT EXISTS feedback (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_feedback_query ON feedback(query_id);
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_active_at TEXT NOT NULL,
+    query_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
+
+CREATE TABLE IF NOT EXISTS auth_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT,
+    user_id TEXT,
+    event TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    ip TEXT,
+    detail TEXT,
+    ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_auth_events_ts ON auth_events(ts);
+
+CREATE TABLE IF NOT EXISTS assets (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page INTEGER,
+    kind TEXT NOT NULL,
+    path TEXT NOT NULL,
+    width INTEGER,
+    height INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_assets_document ON assets(document_id);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+    batch_id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
 """
+
+# Columns added after the first release; created on startup if missing.
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "feedback": {"user_id": "TEXT"},
+    "query_events": {
+        "user_id": "TEXT",
+        "username": "TEXT",
+        "role": "TEXT",
+        "input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "output_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "cost_usd": "REAL NOT NULL DEFAULT 0",
+    },
+    "documents": {
+        "uploaded_by": "TEXT",
+        "vision_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "vision_output_tokens": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "chunks": {
+        "content_type": "TEXT NOT NULL DEFAULT 'text'",
+        "source_method": "TEXT NOT NULL DEFAULT 'plain'",
+        "asset_id": "TEXT",
+        "bbox": "TEXT",
+    },
+}
+
+# Public user fields. password_hash is deliberately absent: no API returns it.
+USER_PUBLIC_FIELDS = "id, username, role, is_active, created_at"
 
 
 class KnowledgeStore:
@@ -78,7 +153,24 @@ class KnowledgeStore:
         self._lock = threading.Lock()
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was first created."""
+        for table, columns in _ADDED_COLUMNS.items():
+            existing = {
+                r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")
+            }
+            for name, decl in columns.items():
+                if name not in existing:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_events_user ON query_events(user_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_events_session ON query_events(session_id)"
+        )
 
     def close(self) -> None:
         self._conn.close()
@@ -93,26 +185,54 @@ class KnowledgeStore:
         return dict(row) if row else None
 
     def insert_document(
-        self, doc: dict[str, Any], chunks: list[dict[str, Any]]
+        self,
+        doc: dict[str, Any],
+        chunks: list[dict[str, Any]],
+        assets: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Insert a document and its chunks atomically."""
+        """Insert a document, its chunks and its assets atomically."""
         with self._lock:
             try:
                 self._conn.execute(
                     """INSERT INTO documents (id, filename, doc_id, title, category,
                        version, status, effective_date, mime_type, size_bytes, pages,
-                       chunk_count, content_hash, created_at)
+                       chunk_count, content_hash, created_at, uploaded_by,
+                       vision_input_tokens, vision_output_tokens)
                        VALUES (:id, :filename, :doc_id, :title, :category, :version,
                        :status, :effective_date, :mime_type, :size_bytes, :pages,
-                       :chunk_count, :content_hash, :created_at)""",
-                    doc,
+                       :chunk_count, :content_hash, :created_at, :uploaded_by,
+                       :vision_input_tokens, :vision_output_tokens)""",
+                    {
+                        "uploaded_by": None,
+                        "vision_input_tokens": 0,
+                        "vision_output_tokens": 0,
+                        **doc,
+                    },
                 )
                 self._conn.executemany(
                     """INSERT INTO chunks (id, document_id, chunk_index, page, section,
-                       content, index_text, embedding)
+                       content, index_text, embedding, content_type, source_method,
+                       asset_id, bbox)
                        VALUES (:id, :document_id, :chunk_index, :page, :section,
-                       :content, :index_text, :embedding)""",
-                    [{**c, "embedding": json.dumps(c["embedding"])} for c in chunks],
+                       :content, :index_text, :embedding, :content_type,
+                       :source_method, :asset_id, :bbox)""",
+                    [
+                        {
+                            "content_type": "text",
+                            "source_method": "plain",
+                            "asset_id": None,
+                            **c,
+                            "embedding": json.dumps(c["embedding"]),
+                            "bbox": json.dumps(c["bbox"]) if c.get("bbox") else None,
+                        }
+                        for c in chunks
+                    ],
+                )
+                self._conn.executemany(
+                    """INSERT INTO assets (id, document_id, page, kind, path, width,
+                       height) VALUES (:id, :document_id, :page, :kind, :path,
+                       :width, :height)""",
+                    assets or [],
                 )
                 self._conn.commit()
             except Exception:
@@ -123,6 +243,42 @@ class KnowledgeStore:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM documents ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_eval_run(
+        self, batch_id: str, started_at: str, finished_at: str, result: dict[str, Any]
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO eval_runs (batch_id, started_at, finished_at, "
+                "payload) VALUES (?, ?, ?, ?)",
+                (batch_id, started_at, finished_at, json.dumps(result, default=str)),
+            )
+            self._conn.commit()
+
+    def latest_eval_run(self) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM eval_runs ORDER BY finished_at DESC LIMIT 1"
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def get_asset(self, asset_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM assets WHERE id = ?", (asset_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_chunks(self, document_id: str) -> list[dict[str, Any]]:
+        """A document's chunks in order, without embeddings (for the viewer)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, chunk_index, page, section, content, content_type,
+                          source_method, asset_id
+                   FROM chunks WHERE document_id = ? ORDER BY chunk_index""",
+                (document_id,),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -140,6 +296,7 @@ class KnowledgeStore:
             rows = self._conn.execute(
                 """SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.page,
                           c.section, c.content, c.index_text, c.embedding,
+                          c.content_type, c.source_method, c.asset_id, c.bbox,
                           d.filename AS document_filename, d.doc_id, d.title,
                           d.category, d.version, d.status
                    FROM chunks c JOIN documents d ON c.document_id = d.id
@@ -149,6 +306,7 @@ class KnowledgeStore:
         for r in rows:
             item = dict(r)
             item["embedding"] = json.loads(item["embedding"])
+            item["bbox"] = json.loads(item["bbox"]) if item["bbox"] else None
             result.append(item)
         return result
 
@@ -156,11 +314,13 @@ class KnowledgeStore:
 
     def insert_event(self, event: dict[str, Any]) -> None:
         identity = event["identity"]
+        usage = event.get("usage") or {}
         with self._lock:
             self._conn.execute(
                 """INSERT INTO query_events (query_id, ts, session_id, config_id,
-                   outcome, total_ms, eval_run_id, payload)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   outcome, total_ms, eval_run_id, payload, user_id, username, role,
+                   input_tokens, output_tokens, cost_usd)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     identity["query_id"],
                     identity["timestamp"],
@@ -170,9 +330,19 @@ class KnowledgeStore:
                     event["performance"]["total_ms"],
                     (event.get("eval") or {}).get("run_id"),
                     json.dumps(event, default=str),
+                    identity.get("user_id"),
+                    identity.get("username"),
+                    identity.get("role"),
+                    usage.get("input_tokens", 0),
+                    usage.get("output_tokens", 0),
+                    usage.get("estimated_cost_usd", 0.0),
                 ),
             )
             self._conn.commit()
+
+    def count_events(self) -> int:
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM query_events").fetchone()[0]
 
     def update_event_payload(self, query_id: str, event: dict[str, Any]) -> None:
         """Replace an event's payload (used to attach evaluation results)."""
@@ -203,10 +373,18 @@ class KnowledgeStore:
         since: str | None = None,
         include_eval: bool = True,
         limit: int | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return event payloads (newest first) matching the filters."""
         clauses: list[str] = []
         params: list[Any] = []
+        if user_id:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
         if config_id:
             clauses.append("config_id = ?")
             params.append(config_id)
@@ -246,7 +424,12 @@ class KnowledgeStore:
     # ── Feedback ─────────────────────────────────────────────
 
     def add_feedback(
-        self, query_id: str, helpful: bool, comment: str | None, created_at: str
+        self,
+        query_id: str,
+        helpful: bool,
+        comment: str | None,
+        created_at: str,
+        user_id: str | None = None,
     ) -> bool:
         with self._lock:
             exists = self._conn.execute(
@@ -255,9 +438,9 @@ class KnowledgeStore:
             if not exists:
                 return False
             self._conn.execute(
-                "INSERT INTO feedback (query_id, helpful, comment, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (query_id, int(helpful), comment, created_at),
+                "INSERT INTO feedback (query_id, helpful, comment, created_at, "
+                "user_id) VALUES (?, ?, ?, ?, ?)",
+                (query_id, int(helpful), comment, created_at, user_id),
             )
             self._conn.commit()
         return True
@@ -277,3 +460,109 @@ class KnowledgeStore:
             "comment": row["comment"],
             "created_at": row["created_at"],
         }
+
+    # ── Users, sessions, auth events ─────────────────────────
+
+    def create_user(self, user: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO users (id, username, password_hash, role, is_active, "
+                "created_at) VALUES (:id, :username, :password_hash, :role, "
+                ":is_active, :created_at)",
+                user,
+            )
+            self._conn.commit()
+
+    def get_user_credentials(self, username: str) -> dict[str, Any] | None:
+        """Internal: includes password_hash. Never return this from an API."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE username = ?", (username,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_user(self, user_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {USER_PUBLIC_FIELDS} FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+        return _public_user(row)
+
+    def list_users(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {USER_PUBLIC_FIELDS} FROM users ORDER BY created_at"
+            ).fetchall()
+        return [u for u in (_public_user(r) for r in rows) if u]
+
+    def count_users(self) -> int:
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+    def record_auth_event(
+        self,
+        event: str,
+        success: bool,
+        ts: str,
+        *,
+        username: str | None = None,
+        user_id: str | None = None,
+        ip: str | None = None,
+        detail: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO auth_events (username, user_id, event, success, ip, "
+                "detail, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (username, user_id, event, int(success), ip, detail, ts),
+            )
+            self._conn.commit()
+
+    def list_auth_events(self, since: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM auth_events"
+        params: list[Any] = []
+        if since:
+            sql += " WHERE ts >= ?"
+            params.append(since)
+        with self._lock:
+            rows = self._conn.execute(sql + " ORDER BY ts", params).fetchall()
+        return [dict(r) for r in rows]
+
+    def session_owner(self, session_id: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT user_id FROM sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return row["user_id"] if row else None
+
+    def touch_session(self, session_id: str, user_id: str, ts: str) -> None:
+        """Create the session on first use; bump activity and query count."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO sessions (session_id, user_id, created_at, "
+                "last_active_at, query_count) VALUES (?, ?, ?, ?, 1) "
+                "ON CONFLICT(session_id) DO UPDATE SET last_active_at = "
+                "excluded.last_active_at, query_count = query_count + 1",
+                (session_id, user_id, ts, ts),
+            )
+            self._conn.commit()
+
+    def list_sessions(self, user_id: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM sessions"
+        params: list[Any] = []
+        if user_id:
+            sql += " WHERE user_id = ?"
+            params.append(user_id)
+        with self._lock:
+            rows = self._conn.execute(
+                sql + " ORDER BY last_active_at DESC", params
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def _public_user(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    user = dict(row)
+    user["is_active"] = bool(user["is_active"])
+    return user

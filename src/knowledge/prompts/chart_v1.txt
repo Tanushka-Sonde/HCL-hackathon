@@ -1,0 +1,7 @@
+Classify this image as one of: chart, diagram, photo, logo, other.
+Reply with JSON only, no prose and no code fence.
+If it is a chart, reply:
+{"kind": "chart", "chart_type": "bar|line|pie|scatter|other", "title": "...", "x_axis": "...", "y_axis": "...", "series": [{"name": "...", "points": [["x label", number], ...]}], "summary": "2-3 sentences with the key trends, the highest and lowest values"}
+Read every number exactly as printed on the chart; never estimate a value that is not labelled.
+If it is a photo, reply: {"kind": "photo", "caption": "one sentence"}
+Otherwise reply: {"kind": "diagram"} or {"kind": "logo"} or {"kind": "other"}.

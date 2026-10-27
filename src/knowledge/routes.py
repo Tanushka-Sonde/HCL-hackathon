@@ -1,13 +1,23 @@
 """Knowledge service API (local demo mode).
 
+Every endpoint except login requires a bearer token. Roles are enforced
+here, server-side: ``user`` may only use the assistant; ``admin`` also gets
+the knowledge base, observability, evaluation and user management.
+
 Endpoints (prefix ``/api/v1/kis``):
-    GET    /config            Active pipeline configuration
+    POST   /auth/login        Username + password -> JWT          (public)
+    GET    /auth/me           Current user                        (any role)
+    GET    /config            Active pipeline configuration       (any role)
+    POST   /query             Ask a question                      (any role)
+    POST   /feedback          Rate one of your own answers        (any role)
+    GET    /admin/users       List users                          (admin)
+    POST   /admin/users       Create a user                       (admin)
+
+Admin only:
     POST   /ingest            Upload and index one document
     POST   /ingest/demo       Index the bundled synthetic demo corpus
     GET    /documents         List indexed documents
     DELETE /documents/{id}    Remove a document from the index
-    POST   /query             Ask a question (grounded answer + citations)
-    POST   /feedback          Helpful / not-helpful feedback
     GET    /metrics           Aggregate dashboard KPIs
     GET    /queries           Recent query events (summaries)
     GET    /queries/{id}      Full per-query drill-down event
@@ -22,21 +32,28 @@ import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, Query, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from src.core.config import get_settings
 from src.core.exceptions import NotFoundError, ValidationError
 from src.core.logging import get_logger
+from src.knowledge.auth import CurrentUser  # noqa: TC001 - FastAPI resolves it at runtime
 from src.knowledge.evaluation import run_evaluation
 from src.knowledge.metrics import compute_metrics, summarize_event
+from src.knowledge.parsing import file_too_large_message
 from src.knowledge.schemas import (
     DemoIngestResponse,
     DocumentInfo,
     EvalRunRequest,
     FeedbackRequest,
     IngestResponse,
+    LoginRequest,
+    LoginResponse,
     QueryRequest,
     QueryResponse,
+    UserCreateRequest,
+    UserInfo,
 )
 from src.knowledge.service import KnowledgeService
 
@@ -47,6 +64,8 @@ router = APIRouter(prefix="/kis", tags=["knowledge"])
 _service: KnowledgeService | None = None
 _service_lock = threading.Lock()
 _eval_state: dict[str, Any] = {"status": "idle"}
+LARGE_EVENT_COUNT = 5000
+DEFAULT_WINDOW_HOURS = 24 * 7
 
 
 def get_service() -> KnowledgeService:
@@ -59,26 +78,270 @@ def get_service() -> KnowledgeService:
     return _service
 
 
+def _client_ip(request: Request) -> str | None:
+    return request.client.host if request.client else None
+
+
+def current_user(
+    request: Request, svc: KnowledgeService = Depends(get_service)
+) -> CurrentUser:
+    """Any signed-in, active user (401 otherwise)."""
+    return svc.auth.authenticate(request.headers.get("Authorization"))
+
+
+def admin_user(
+    request: Request,
+    user: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> CurrentUser:
+    """An admin (403 and a logged ``forbidden`` auth event otherwise)."""
+    svc.auth.require_admin(user, request.url.path, _client_ip(request))
+    return user
+
+
+# ── Auth ─────────────────────────────────────────────────────
+
+
+@router.post("/auth/login", response_model=LoginResponse)
+async def login(
+    body: LoginRequest, request: Request, svc: KnowledgeService = Depends(get_service)
+) -> LoginResponse:
+    result = await asyncio.to_thread(
+        svc.auth.login, body.username, body.password, _client_ip(request)
+    )
+    return LoginResponse(**result)
+
+
+@router.get("/auth/me", response_model=UserInfo)
+async def me(
+    user: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> UserInfo:
+    return UserInfo(**(svc.store.get_user(user.id) or {}))
+
+
+@router.get("/admin/users", response_model=list[UserInfo])
+async def list_users(
+    _: CurrentUser = Depends(admin_user), svc: KnowledgeService = Depends(get_service)
+) -> list[UserInfo]:
+    return [UserInfo(**u) for u in svc.store.list_users()]
+
+
+@router.post("/admin/users", response_model=UserInfo, status_code=201)
+async def create_user(
+    body: UserCreateRequest,
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> UserInfo:
+    user = await asyncio.to_thread(
+        svc.auth.create_user, body.username, body.password, body.role
+    )
+    return UserInfo(**user)
+
+
+@router.get("/admin/users/summary")
+async def users_summary(
+    _: CurrentUser = Depends(admin_user), svc: KnowledgeService = Depends(get_service)
+) -> list[dict[str, Any]]:
+    """Per user: queries, sessions, tokens, cost, outcomes, anomaly flags."""
+    return await asyncio.to_thread(svc.user_summaries)
+
+
+@router.get("/admin/users/{user_id}/sessions")
+async def user_sessions(
+    user_id: str,
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    if svc.store.get_user(user_id) is None:
+        raise NotFoundError("User", user_id)
+    return svc.session_rows(user_id, masked=False)
+
+
+@router.get("/admin/sessions/{session_id}")
+async def session_transcript(
+    session_id: str,
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """Full raw transcript with per-turn tokens and outcome (admin)."""
+    turns = svc.transcript(session_id, masked=False)
+    if not turns:
+        raise NotFoundError("Session", session_id)
+    return turns
+
+
+@router.get("/admin/anomalies")
+async def anomalies(
+    since_hours: float = Query(default=24, gt=0, le=24 * 30),
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(svc.anomalies, since_hours)
+
+
+# ── Own history (any role) ───────────────────────────────────
+
+
+@router.get("/my/sessions")
+async def my_sessions(
+    user: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    return svc.session_rows(user.id, masked=not user.is_admin)
+
+
+@router.get("/my/history")
+async def my_history(
+    session_id: str | None = Query(default=None, max_length=64),
+    user: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> dict[str, Any]:
+    """Your own sessions and turns (masked for users) and token usage."""
+    sessions = svc.session_rows(user.id, masked=not user.is_admin)
+    turns = (
+        svc.transcript(session_id, masked=not user.is_admin, user_id=user.id)
+        if session_id
+        else []
+    )
+    return {
+        "sessions": sessions,
+        "turns": turns,
+        "usage": {
+            "input_tokens": sum(s["input_tokens"] for s in sessions),
+            "output_tokens": sum(s["output_tokens"] for s in sessions),
+            "cost_usd": round(sum(s["cost_usd"] for s in sessions), 6),
+        },
+    }
+
+
+# ── Assistant (any role) ─────────────────────────────────────
+
+
 @router.get("/config")
-async def get_config(svc: KnowledgeService = Depends(get_service)) -> dict[str, Any]:
+async def get_config(
+    _: CurrentUser = Depends(current_user), svc: KnowledgeService = Depends(get_service)
+) -> dict[str, Any]:
     return svc.describe()
+
+
+@router.post("/query", response_model=QueryResponse)
+async def query(
+    body: QueryRequest,
+    request: Request,
+    user: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> QueryResponse:
+    return await svc.query(
+        body, correlation_id=getattr(request.state, "request_id", None), user=user
+    )
+
+
+@router.get("/assets/{asset_id}")
+async def get_asset(
+    asset_id: str,
+    _: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> FileResponse:
+    """An original image (chart, scanned page, uploaded photo) for citations."""
+    path = svc.asset_path(asset_id)
+    if path is None:
+        raise NotFoundError("Asset", asset_id)
+    return FileResponse(path, media_type="image/png")
+
+
+DEFAULT_IMAGE_QUESTION = (
+    "What does this image show, and what do the documents say about it?"
+)
+
+
+@router.post("/query/multimodal", response_model=QueryResponse)
+async def query_multimodal(
+    request: Request,
+    image: UploadFile,
+    query: str = Form(default="", max_length=2000),
+    session_id: str | None = Form(default=None, max_length=64),
+    config_id: str = Form(default="B", pattern="^[ABC]$"),
+    top_k: int = Form(default=5, ge=1, le=10),
+    max_input_tokens: int = Form(default=3000, ge=256, le=32_000),
+    max_output_tokens: int = Form(default=500, ge=32, le=4096),
+    user: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> QueryResponse:
+    """Ask about an attached image (png/jpg/webp, max 10 MB)."""
+    limit = svc.settings.kis_query_image_max_mb * 1_048_576
+    if image.size is not None and image.size > limit:
+        raise ValidationError(file_too_large_message(image.size, limit))
+    content = await image.read(limit + 1)
+    question = query.strip() or DEFAULT_IMAGE_QUESTION
+    described = await svc.describe_query_image(
+        content, image.filename or "image.png", question
+    )
+    body = QueryRequest(
+        query=question,
+        session_id=session_id,
+        config_id=config_id,  # type: ignore[arg-type]
+        top_k=top_k,
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+    )
+    return await svc.query(
+        body,
+        correlation_id=getattr(request.state, "request_id", None),
+        user=user,
+        image=described,
+    )
+
+
+@router.post("/feedback")
+async def feedback(
+    body: FeedbackRequest,
+    user: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> dict[str, str]:
+    event = svc.store.get_event(body.query_id)
+    # Users may only rate their own answers; someone else's query is "not found".
+    if event is None or (
+        not user.is_admin and event["identity"].get("user_id") != user.id
+    ):
+        raise NotFoundError("Query", body.query_id)
+    svc.add_feedback(body.query_id, body.helpful, body.comment, user_id=user.id)
+    return {"status": "recorded"}
+
+
+# ── Knowledge base (admin) ───────────────────────────────────
 
 
 @router.post("/ingest", response_model=IngestResponse, status_code=201)
 async def ingest(
-    file: UploadFile, svc: KnowledgeService = Depends(get_service)
+    file: UploadFile,
+    category: str | None = Form(default=None, max_length=50),
+    version: str | None = Form(default=None, max_length=20),
+    status: str | None = Form(default=None, max_length=20),
+    effective_date: str | None = Form(default=None, max_length=10),
+    user: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
 ) -> IngestResponse:
     limit = svc.settings.kis_max_upload_mb * 1_048_576
+    if file.size is not None and file.size > limit:
+        raise ValidationError(file_too_large_message(file.size, limit))
     content = await file.read(limit + 1)
     if len(content) > limit:
-        raise ValidationError(
-            f"File exceeds the {svc.settings.kis_max_upload_mb} MB limit."
-        )
-    return await asyncio.to_thread(svc.ingest, file.filename or "untitled.txt", content)
+        raise ValidationError(file_too_large_message(len(content), limit))
+    metadata = {
+        "category": category,
+        "version": version,
+        "status": status,
+        "effective": effective_date,
+    }
+    return await asyncio.to_thread(
+        svc.ingest, file.filename or "untitled.txt", content, metadata, user.id
+    )
 
 
 @router.post("/ingest/demo", response_model=DemoIngestResponse)
 async def ingest_demo(
+    _: CurrentUser = Depends(admin_user),
     svc: KnowledgeService = Depends(get_service),
 ) -> DemoIngestResponse:
     return await asyncio.to_thread(svc.ingest_demo)
@@ -86,35 +349,30 @@ async def ingest_demo(
 
 @router.get("/documents", response_model=list[DocumentInfo])
 async def list_documents(
+    _: CurrentUser = Depends(admin_user),
     svc: KnowledgeService = Depends(get_service),
 ) -> list[DocumentInfo]:
     return svc.list_documents()
 
 
+@router.get("/documents/{document_id}/chunks")
+async def document_chunks(
+    document_id: str,
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """What chunking produced for one document (page, section, type)."""
+    return svc.store.list_chunks(document_id)
+
+
 @router.delete("/documents/{document_id}", status_code=204)
 async def delete_document(
-    document_id: str, svc: KnowledgeService = Depends(get_service)
+    document_id: str,
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
 ) -> None:
     if not svc.delete_document(document_id):
         raise NotFoundError("Document", document_id)
-
-
-@router.post("/query", response_model=QueryResponse)
-async def query(
-    body: QueryRequest, request: Request, svc: KnowledgeService = Depends(get_service)
-) -> QueryResponse:
-    return await svc.query(
-        body, correlation_id=getattr(request.state, "request_id", None)
-    )
-
-
-@router.post("/feedback")
-async def feedback(
-    body: FeedbackRequest, svc: KnowledgeService = Depends(get_service)
-) -> dict[str, str]:
-    if not svc.add_feedback(body.query_id, body.helpful, body.comment):
-        raise NotFoundError("Query", body.query_id)
-    return {"status": "recorded"}
 
 
 def _filtered_events(
@@ -124,8 +382,12 @@ def _filtered_events(
     since_hours: float | None,
     include_eval: bool,
     limit: int | None = None,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     since = None
+    if since_hours is None and svc.store.count_events() > LARGE_EVENT_COUNT:
+        # Every KPI re-reads the stored events; keep large stores responsive.
+        since_hours = DEFAULT_WINDOW_HOURS
     if since_hours:
         since = (datetime.now(UTC) - timedelta(hours=since_hours)).isoformat(
             timespec="milliseconds"
@@ -136,37 +398,51 @@ def _filtered_events(
         since=since,
         include_eval=include_eval,
         limit=limit,
+        user_id=user_id,
     )
 
 
 @router.get("/metrics")
 async def metrics(
-    config_id: str | None = Query(default=None, pattern="^[AB]$"),
+    config_id: str | None = Query(default=None, pattern="^[ABC]$"),
     outcome: str | None = Query(default=None, pattern="^(success|partial|failed)$"),
     since_hours: float | None = Query(default=None, gt=0, le=24 * 365),
     include_eval: bool = True,
+    user_id: str | None = Query(default=None, max_length=64),
+    _: CurrentUser = Depends(admin_user),
     svc: KnowledgeService = Depends(get_service),
 ) -> dict[str, Any]:
-    events = _filtered_events(svc, config_id, outcome, since_hours, include_eval)
-    return compute_metrics(events, svc.settings.kis_grounding_threshold)
+    events = _filtered_events(
+        svc, config_id, outcome, since_hours, include_eval, user_id=user_id
+    )
+    result = compute_metrics(events, svc.settings.kis_grounding_threshold)
+    if since_hours is None and svc.store.count_events() > LARGE_EVENT_COUNT:
+        result["window_note"] = "More than 5,000 events: showing the last 7 days."
+    return result
 
 
 @router.get("/queries")
 async def list_queries(
-    config_id: str | None = Query(default=None, pattern="^[AB]$"),
+    config_id: str | None = Query(default=None, pattern="^[ABC]$"),
     outcome: str | None = Query(default=None, pattern="^(success|partial|failed)$"),
     since_hours: float | None = Query(default=None, gt=0, le=24 * 365),
     include_eval: bool = True,
     limit: int = Query(default=50, ge=1, le=500),
+    user_id: str | None = Query(default=None, max_length=64),
+    _: CurrentUser = Depends(admin_user),
     svc: KnowledgeService = Depends(get_service),
 ) -> list[dict[str, Any]]:
-    events = _filtered_events(svc, config_id, outcome, since_hours, include_eval, limit)
+    events = _filtered_events(
+        svc, config_id, outcome, since_hours, include_eval, limit, user_id
+    )
     return [summarize_event(e) for e in events]
 
 
 @router.get("/queries/{query_id}")
 async def get_query(
-    query_id: str, svc: KnowledgeService = Depends(get_service)
+    query_id: str,
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
 ) -> dict[str, Any]:
     event = svc.store.get_event(query_id)
     if event is None:
@@ -188,7 +464,9 @@ async def _run_eval_background(svc: KnowledgeService, configs: list[str]) -> Non
 
 @router.post("/eval/run", status_code=202)
 async def start_eval(
-    body: EvalRunRequest, svc: KnowledgeService = Depends(get_service)
+    body: EvalRunRequest,
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
 ) -> dict[str, Any]:
     if _eval_state.get("status") == "running":
         return {"status": "running", "started_at": _eval_state.get("started_at")}
@@ -203,5 +481,16 @@ async def start_eval(
 
 
 @router.get("/eval/status")
-async def eval_status() -> dict[str, Any]:
+async def eval_status(
+    _: CurrentUser = Depends(admin_user), svc: KnowledgeService = Depends(get_service)
+) -> dict[str, Any]:
+    if _eval_state.get("status") == "idle":
+        # After a restart, show the last saved run instead of "idle".
+        last = svc.store.latest_eval_run()
+        if last:
+            return {
+                "status": "completed",
+                "result": last,
+                "finished_at": last["finished_at"],
+            }
     return {k: v for k, v in _eval_state.items() if k != "task"}

@@ -1,0 +1,17 @@
+Doc-ID: HR-POL-015
+Title: Learning and Development Policy
+Category: HR
+Version: 1.0
+Status: effective
+Effective: 2025-01-01
+
+SYNTHETIC DEMO DOCUMENT. Orion Synthetic Industries (OSI) is fictional.
+
+1. TRAINING BUDGET
+Each employee has a learning budget of USD 1,500 per calendar year. Unused budget does not carry over to the next year.
+
+2. CERTIFICATIONS
+Professional certification exam fees are reimbursed once the exam is passed. Employees who leave within 12 months of a reimbursed certification repay half of the fee.
+
+3. LEARNING TIME
+Employees may spend up to 4 hours per month of working time on approved learning.

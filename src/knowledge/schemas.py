@@ -6,7 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-ConfigId = Literal["A", "B"]
+# A = vector only, B = hybrid + rerank, C = hybrid without rerank (ablation)
+ConfigId = Literal["A", "B", "C"]
 Outcome = Literal["success", "partial", "failed"]
 Route = Literal["docs", "sql_tool", "both"]
 
@@ -23,6 +24,22 @@ class QueryRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=10)
     category: str | None = Field(default=None, max_length=50)
     status: str | None = Field(default=None, max_length=20)
+    doc_id: str | None = Field(default=None, max_length=60)
+    version: str | None = Field(default=None, max_length=20)
+    # Token budgets; the server also applies KIS_MAX_*_TOKENS_CAP.
+    max_input_tokens: int = Field(default=3000, ge=256, le=32_000)
+    max_output_tokens: int = Field(default=500, ge=32, le=4096)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=6, max_length=128)
+    role: Literal["admin", "user"] = "user"
 
 
 class FeedbackRequest(BaseModel):
@@ -57,6 +74,10 @@ class Evidence(BaseModel):
     page: int | None = None
     section: str | None = None
     content: str
+    content_type: str = "text"
+    source_method: str = "plain"
+    asset_id: str | None = None
+    bbox: list[float] | None = None
     vector_score: float | None = None
     vector_rank: int | None = None
     bm25_score: float | None = None
@@ -81,6 +102,7 @@ class ToolCall(BaseModel):
     result_summary: str = ""
     rows: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
+    error_detail: str | None = None
     simulated_failure: bool = False
 
 
@@ -114,8 +136,29 @@ class QueryResponse(BaseModel):
     conflicts: list[str]
     safety: dict[str, Any]
     grounding_score: float | None
+    calculations: list[dict[str, Any]] = Field(default_factory=list)
+    visuals: list[dict[str, Any]] = Field(default_factory=list)
+    usage: dict[str, Any] = Field(default_factory=dict)
     latency_ms: float
     llm_mode: Literal["groq", "extractive"]
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    username: str
+    role: Literal["admin", "user"]
+    expires_in_minutes: int
+
+
+class UserInfo(BaseModel):
+    """Public user fields. There is deliberately no password field."""
+
+    id: str
+    username: str
+    role: Literal["admin", "user"]
+    is_active: bool
+    created_at: str
 
 
 class DocumentInfo(BaseModel):
@@ -134,6 +177,9 @@ class DocumentInfo(BaseModel):
     pages: int | None
     chunk_count: int
     created_at: str
+    uploaded_by: str | None = None
+    vision_input_tokens: int = 0
+    vision_output_tokens: int = 0
 
 
 class IngestResponse(BaseModel):
@@ -141,6 +187,8 @@ class IngestResponse(BaseModel):
 
     document: DocumentInfo
     duplicate: bool = False
+    skipped_pages: list[int] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DemoIngestResponse(BaseModel):

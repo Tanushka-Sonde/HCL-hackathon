@@ -3,7 +3,11 @@
 Generates (all synthetic, no external downloads):
   demo/corpus/TRV-POL-003_Travel_Expense_Policy.pdf   (multi-page PDF)
   demo/corpus/FIN-SOP-045_Procurement_SOP.docx        (DOCX with headings + table)
-  demo/samples/scanned_receipt_no_text.pdf            (image-only PDF -> OCR rejection demo)
+  demo/corpus/FIN-RPT-010_Monthly_PnL_2026.pdf       (PDF with a ruled P&L table)
+  demo/corpus/FIN-RPT-011_Quarterly_Revenue_Review.pdf (PDF with a raster bar chart)
+  demo/corpus/HR-REC-020_Employee_Compensation_Records.txt (salaries/PII -> masking demo)
+  demo/samples/scanned_receipt_no_text.pdf            (image-only scan -> vision OCR demo)
+  demo/samples/handwritten_ops_note.jpg               (handwriting photo -> vision OCR demo)
   demo/samples/corrupted_file.pdf                     (invalid PDF -> intake rejection demo)
   data/business.db                                    (SQLite from demo/business_seed.sql)
 
@@ -19,6 +23,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from scripts.demo_media import (  # noqa: E402
+    COMPENSATION_DOC,
+    handwritten_note,
+    write_chart_pdf,
+    write_pnl_pdf,
+    write_scanned_receipt_pdf,
+)
 from src.knowledge.tools import build_business_db  # noqa: E402
 
 CORPUS = ROOT / "demo" / "corpus"
@@ -212,7 +223,13 @@ def main() -> None:
     SAMPLES.mkdir(parents=True, exist_ok=True)
     write_text_pdf(CORPUS / "TRV-POL-003_Travel_Expense_Policy.pdf", TRAVEL_PAGES)
     write_procurement_docx(CORPUS / "FIN-SOP-045_Procurement_SOP.docx")
-    write_text_pdf(SAMPLES / "scanned_receipt_no_text.pdf", [[]], draw_only=True)
+    write_pnl_pdf(CORPUS / "FIN-RPT-010_Monthly_PnL_2026.pdf")
+    write_chart_pdf(CORPUS / "FIN-RPT-011_Quarterly_Revenue_Review.pdf")
+    (CORPUS / "HR-REC-020_Employee_Compensation_Records.txt").write_text(
+        COMPENSATION_DOC, encoding="utf-8"
+    )
+    write_scanned_receipt_pdf(SAMPLES / "scanned_receipt_no_text.pdf")
+    handwritten_note(SAMPLES / "handwritten_ops_note.jpg")
     (SAMPLES / "corrupted_file.pdf").write_bytes(b"this is not really a pdf file\n")
     build_business_db(
         ROOT / "data" / "business.db", ROOT / "demo" / "business_seed.sql"

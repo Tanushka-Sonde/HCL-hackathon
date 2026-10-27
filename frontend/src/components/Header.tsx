@@ -6,37 +6,68 @@ import { useTenant } from './TenantProvider';
 import Link from 'next/link';
 import { fetchApi } from '@/lib/api';
 import { DEMO_MODE } from '@/lib/demo';
+import { useAuth } from '@/lib/auth';
 
 // Pages where the header should NOT appear
 const PUBLIC_PATHS = ['/login', '/'];
 
-const DEMO_NAV = [
+const ADMIN_NAV = [
   { href: '/assistant', label: 'Assistant' },
   { href: '/knowledge', label: 'Knowledge Base' },
   { href: '/observability', label: 'Observability' },
+  { href: '/users', label: 'Users' },
+  { href: '/evaluation', label: 'Evaluation' },
 ];
 
 function DemoHeader() {
   const pathname = usePathname();
+  const { user, logout } = useAuth();
+  const [menuOpen, setMenuOpen] = useState(false);
+  if (!user || pathname === '/login') return null;
+  const isAdmin = user.role === 'admin';
+
   return (
-    <header className="app-header">
-      <Link href="/" className="brand">
-        <span className="brand-mark">◆</span> Enterprise Knowledge Assistant
+    <header className={`app-header ${isAdmin ? '' : 'app-header-slim'}`}>
+      <Link href={isAdmin ? '/observability' : '/assistant'} className="brand">
+        <span className="brand-mark" aria-hidden>◆</span> Knowledge Assistant
       </Link>
-      <nav className="app-nav">
-        {DEMO_NAV.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            className={`nav-link ${pathname.startsWith(item.href) ? 'active' : ''}`}
+      {isAdmin && (
+        <>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm nav-toggle"
+            aria-expanded={menuOpen}
+            aria-controls="admin-nav"
+            onClick={() => setMenuOpen((o) => !o)}
           >
-            {item.label}
+            Menu
+          </button>
+          <nav id="admin-nav" className={`app-nav ${menuOpen ? 'open' : ''}`} aria-label="Admin">
+            {ADMIN_NAV.map((item) => (
+              <Link
+                key={item.href}
+                href={item.href}
+                onClick={() => setMenuOpen(false)}
+                className={`nav-link ${pathname.startsWith(item.href) ? 'active' : ''}`}
+                aria-current={pathname.startsWith(item.href) ? 'page' : undefined}
+              >
+                {item.label}
+              </Link>
+            ))}
+          </nav>
+        </>
+      )}
+      <div className="header-right">
+        {!isAdmin && (
+          <Link href="/history" className={`nav-link ${pathname.startsWith('/history') ? 'active' : ''}`}>
+            My history
           </Link>
-        ))}
-      </nav>
-      <span className="badge badge-warn" title="No sign-in. SQLite store, synthetic data only.">
-        Local demo mode
-      </span>
+        )}
+        <span className="badge badge-muted" title={`Signed in as ${user.role}`}>
+          {user.username} · {user.role}
+        </span>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={logout}>Sign out</button>
+      </div>
     </header>
   );
 }

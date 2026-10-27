@@ -1,8 +1,8 @@
-"""Run the A/B configuration experiment on the fixed evaluation set.
+"""Run the configuration experiment (A, B and the ablation C) on the evaluation set.
 
 Writes reports/evaluation_report.md and prints the summary table.
 
-Usage:  python scripts/run_eval.py [A B]
+Usage:  python scripts/run_eval.py [A B C]
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from src.knowledge.service import KnowledgeService  # noqa: E402
 
 
 def main() -> None:
-    configs = [c for c in sys.argv[1:] if c in ("A", "B")] or ["A", "B"]
+    configs = [c for c in sys.argv[1:] if c in ("A", "B", "C")] or ["A", "B", "C"]
     svc = KnowledgeService(get_settings())
     if not len(svc.index):
         svc.ingest_demo()
@@ -28,7 +28,11 @@ def main() -> None:
     for cfg, data in results["configs"].items():
         print(f"\n[{cfg}] {data['label']}")
         for key, value in data["summary"].items():
-            print(f"  {key:<24} {value}")
+            if key != "by_scenario":
+                print(f"  {key:<24} {value}")
+    if results.get("recommendation"):
+        rec = results["recommendation"]
+        print(f"\nRecommendation: {rec['config']} - {rec['why']}")
     print(f"\nReport written to {REPORT_PATH.relative_to(ROOT)}")
 
 

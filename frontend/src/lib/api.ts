@@ -27,10 +27,12 @@ export async function fetchApi(endpoint: string, options: RequestInit = {}) {
     headers,
   });
 
-  if (response.status === 401) {
+  // An expired or invalid token signs the user out. A failed login attempt is
+  // also a 401, but it must reach the form so the error can be shown.
+  if (response.status === 401 && !endpoint.endsWith('/auth/login')) {
     if (typeof window !== 'undefined') {
       localStorage.removeItem('access_token');
-      window.location.href = '/login';
+      if (window.location.pathname !== '/login') window.location.href = '/login';
     }
   }
 
