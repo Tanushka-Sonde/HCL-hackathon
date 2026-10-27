@@ -1,0 +1,63 @@
+[project]
+name = "ai-research-platform"
+version = "0.1.0"
+description = "Multi-tenant AI Research Platform with hybrid retrieval (pgvector + tsvector)"
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["src", "tests", "mcp_server"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "TCH",  # flake8-type-checking
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults (FastAPI Depends)
+    "RUF012", # mutable class variables (SQLAlchemy models use ClassVar pattern)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "mcp_server"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+markers = [
+    "integration: marks tests requiring running services (PostgreSQL, MinIO)",
+    "concurrency: marks tests exercising concurrent access patterns",
+    "load: marks load/performance tests",
+]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
