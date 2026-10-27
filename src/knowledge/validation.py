@@ -109,7 +109,9 @@ def _calc_results(
     out = []
     for calc in calculations or []:
         if calc.get("result") is not None:
-            out.append((calc["result"].replace(",", ""), numbers_in(calc["expr"])))
+            # numbers_in() drops signs, so a result of -25,000 is matched as 25000.
+            result = calc["result"].replace(",", "").lstrip("-")
+            out.append((result, numbers_in(calc["expr"])))
     return out
 
 

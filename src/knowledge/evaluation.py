@@ -144,7 +144,7 @@ def _missing_capability(svc: KnowledgeService, case: dict[str, Any]) -> str | No
 async def _judge(
     svc: KnowledgeService, case: dict[str, Any], answer: str
 ) -> dict[str, Any] | None:
-    if not svc.settings.groq_api_key:
+    if not (svc.settings.groq_api_key and svc.settings.kis_eval_judge):
         return None
     from src.knowledge.generation import get_async_client, model_options
     from src.knowledge.vision import parse_json_reply
@@ -352,7 +352,7 @@ async def run_evaluation(svc: KnowledgeService, configs: list[str]) -> dict[str,
     started = datetime.now(UTC).isoformat(timespec="seconds")
     batch = uuid.uuid4().hex[:8]
     # Stay under hosted-LLM free-tier rate limits when an API key is configured.
-    pause = 2.2 if svc.settings.groq_api_key else 0.0
+    pause = svc.settings.kis_eval_pause_seconds if svc.settings.groq_api_key else 0.0
     results: dict[str, Any] = {
         "started_at": started,
         "batch_id": batch,

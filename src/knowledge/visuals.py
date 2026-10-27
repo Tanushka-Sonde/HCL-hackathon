@@ -104,9 +104,16 @@ def check_values(
 ) -> list[str]:
     """Values that are neither in the cited sources nor calc results."""
     allowed = _source_numbers(source_ids, evidence, tools)
-    allowed |= {c["result"].replace(",", "") for c in calculations if c.get("result")}
+    allowed |= {
+        c["result"].replace(",", "").lstrip("-")
+        for c in calculations
+        if c.get("result")
+    }
     return [
-        _norm(v) for s in spec["series"] for v in s["values"] if _norm(v) not in allowed
+        _norm(v)
+        for s in spec["series"]
+        for v in s["values"]
+        if _norm(abs(v)) not in allowed  # numbers_in() drops signs
     ]
 
 

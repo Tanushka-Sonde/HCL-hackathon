@@ -210,3 +210,23 @@ def test_question_words_are_not_claims_but_new_words_are() -> None:
     q = "What was the total profit of the last month?"
     assert assess_grounding(restated, [ev], [], question=q)["score"] == 1.0
     assert assess_grounding(invented, [ev], [], question=q)["score"] == 0.0
+
+
+def test_negative_calc_result_is_grounded() -> None:
+    """Live: 'a decrease of -25,000 (= 452000-477000)' was marked unsupported."""
+    ev = Evidence(
+        source_id="S1",
+        chunk_id="c",
+        document_id="d",
+        filename="f.pdf",
+        doc_id="FIN-RPT-011",
+        title="Quarterly Revenue Review 2025",
+        content_type="chart",
+        content="| Q2 2025 | 477000 |\n| Q3 2025 | 452000 |",
+        relevance=1.0,
+    )
+    answer, calcs = apply_calcs(
+        "Revenue in Q3 2025 was 452,000, a change of {{calc: 452000-477000}} from Q2 2025 [S1]."
+    )
+    assert calcs[0]["result"] == "-25,000"
+    assert assess_grounding(answer, [ev], [], calcs)["score"] == 1.0

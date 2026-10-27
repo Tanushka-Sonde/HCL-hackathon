@@ -118,10 +118,11 @@
     {
       "id": "insufficient-02",
       "scenario": "Insufficient evidence",
-      "question": "What was the Q3 revenue growth?",
+      "question": "What was the employee attrition rate in 2025?",
       "expected_docs": [],
       "must_include": [],
-      "expected_behavior": "fallback"
+      "expected_behavior": "fallback",
+      "note": "Was 'What was the Q3 revenue growth?', which became answerable when the quarterly revenue review was added (now calc-02)."
     },
     {
       "id": "conflict-01",
@@ -478,6 +479,21 @@
         "5 November"
       ],
       "expected_behavior": "answer"
+    },
+    {
+      "id": "calc-02",
+      "scenario": "Table arithmetic",
+      "requires": [
+        "llm"
+      ],
+      "question": "By how much did revenue change from Q2 to Q3 2025?",
+      "expected_docs": [
+        "FIN-RPT-011"
+      ],
+      "must_include": [
+        "25,000"
+      ],
+      "expected_behavior": "calc"
     }
   ]
 }
