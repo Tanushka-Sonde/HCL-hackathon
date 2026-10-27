@@ -1,0 +1,1 @@
+Transcribe all text in this image exactly, including handwriting. Keep line breaks and list structure. If there is a table, output it as a GitHub markdown table. If a word is illegible write [illegible]. Output only the transcription.

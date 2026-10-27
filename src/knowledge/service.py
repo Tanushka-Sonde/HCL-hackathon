@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 import threading
 import time
 import uuid
@@ -24,7 +25,13 @@ from src.knowledge.context import ConversationMemory, Turn, resolve
 from src.knowledge.embeddings import build_embedder, build_reranker
 from src.knowledge.generation import INSUFFICIENT_ANSWER, generate
 from src.knowledge.outcome import confidence_for, decide_outcome
-from src.knowledge.parsing import ALLOWED_EXTENSIONS, parse_document
+from src.knowledge.parsing import (
+    ALLOWED_EXTENSIONS,
+    Asset,
+    TextUnit,
+    parse_document,
+    split_table,
+)
 from src.knowledge.retrieval import Candidate, KnowledgeIndex
 from src.knowledge.router import route_query, strip_data_terms
 from src.knowledge.safety import (
@@ -50,6 +57,7 @@ from src.knowledge.validation import (
     is_insufficient,
     validate_citations,
 )
+from src.knowledge.vision import VisionClient
 
 if TYPE_CHECKING:
     from src.core.config import Settings
@@ -87,6 +95,7 @@ class KnowledgeService:
         self.demo_dir = Path(demo_dir or PROJECT_ROOT / "demo")
         self.store = KnowledgeStore(self.data_dir / "kis.db")
         self.auth = AuthService(self.store, settings)
+        self.vision = VisionClient(settings)
         self.embedder, self.embedder_name, semantic = build_embedder(settings)
         self.reranker = build_reranker(settings)
         self.index = KnowledgeIndex(self.embedder, semantic)
@@ -132,6 +141,10 @@ class KnowledgeService:
             "grounding_threshold": self.settings.kis_grounding_threshold,
             "indexed_chunks": len(self.index),
             "configs": {c: self.config_label(c) for c in ("A", "B")},
+            "vision_model": self.vision.model if self.vision.enabled else None,
+            "vision_enabled": self.vision.enabled,
+            "max_upload_mb": self.settings.kis_max_upload_mb,
+            "allowed_types": sorted(ALLOWED_EXTENSIONS),
             "sql_templates": sorted(TEMPLATES),
         }
 
@@ -144,13 +157,21 @@ class KnowledgeService:
         metadata: dict[str, str | None] | None = None,
         uploaded_by: str | None = None,
     ) -> IngestResponse:
+        content_hash = hashlib.sha256(content).hexdigest()
+        # Check for a duplicate first, so re-uploads never spend vision calls.
+        existing = self.store.find_document_by_hash(content_hash)
+        if existing:
+            return IngestResponse(
+                document=DocumentInfo(**_doc_fields(existing)), duplicate=True
+            )
         parsed = parse_document(
             filename,
             content,
             self.settings.kis_max_upload_mb * 1_048_576,
             overrides=metadata,
+            vision=self.vision,
+            vision_max_calls=self.settings.kis_vision_max_pages,
         )
-        content_hash = hashlib.sha256(content).hexdigest()
         with self._ingest_lock:
             existing = self.store.find_document_by_hash(content_hash)
             if existing:
@@ -184,7 +205,7 @@ class KnowledgeService:
             )
             chunks: list[dict[str, Any]] = []
             for unit in parsed.units:
-                for piece in self.chunker.chunk(unit.text):
+                for piece in self._unit_pieces(unit):
                     section = f" | {unit.section}" if unit.section else ""
                     chunks.append(
                         {
@@ -205,10 +226,80 @@ class KnowledgeService:
             for chunk, emb in zip(chunks, embeddings, strict=False):
                 chunk["embedding"] = [round(float(x), 6) for x in emb]
             doc["chunk_count"] = len(chunks)
-            self.store.insert_document(doc, chunks)
+            assets = self._save_assets(doc_uuid, parsed.assets)
+            try:
+                self.store.insert_document(doc, chunks, assets)
+            except Exception:
+                self._remove_asset_files(doc_uuid)
+                raise
             self.index.rebuild(self.store.load_chunks())
-        logger.info("kis_document_ingested", filename=filename, chunks=len(chunks))
-        return IngestResponse(document=DocumentInfo(**_doc_fields(doc)))
+        logger.info(
+            "kis_document_ingested",
+            filename=filename,
+            chunks=len(chunks),
+            assets=len(assets),
+            vision_calls=parsed.vision_calls,
+        )
+        return IngestResponse(
+            document=DocumentInfo(**_doc_fields(doc)),
+            skipped_pages=parsed.skipped_pages,
+            warnings=parsed.warnings,
+        )
+
+    def _unit_pieces(self, unit: TextUnit) -> list[str]:
+        """Text is chunked; a table is one chunk (split by rows, header kept)."""
+        if unit.content_type == "table":
+            where = f" (page {unit.page})" if unit.page else ""
+            caption = f"Table: {unit.section or 'untitled table'}{where}"
+            return [
+                f"{caption}\n{piece}"
+                for piece in split_table(
+                    unit.text, self.settings.kis_table_chunk_max_chars
+                )
+            ]
+        if unit.content_type in ("chart", "image"):
+            return [unit.text]  # already a compact, self-describing summary
+        return self.chunker.chunk(unit.text)
+
+    # ── Assets (page renders, charts, uploaded images) ───────
+
+    def _asset_dir(self, document_id: str) -> Path:
+        return self.data_dir / "assets" / document_id
+
+    def _save_assets(self, document_id: str, assets: list[Asset]) -> list[dict]:
+        rows = []
+        if not assets:
+            return rows
+        folder = self._asset_dir(document_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        for asset in assets:
+            path = folder / f"{asset.asset_id}.png"
+            path.write_bytes(asset.png)
+            rows.append(
+                {
+                    "id": asset.asset_id,
+                    "document_id": document_id,
+                    "page": asset.page,
+                    "kind": asset.kind,
+                    "path": path.relative_to(self.data_dir).as_posix(),
+                    "width": asset.width,
+                    "height": asset.height,
+                }
+            )
+        return rows
+
+    def _remove_asset_files(self, document_id: str) -> None:
+        shutil.rmtree(self._asset_dir(document_id), ignore_errors=True)
+
+    def asset_path(self, asset_id: str) -> Path | None:
+        row = self.store.get_asset(asset_id)
+        if row is None:
+            return None
+        path = (self.data_dir / row["path"]).resolve()
+        # Never serve anything outside the data directory.
+        if not path.is_relative_to(self.data_dir.resolve()) or not path.is_file():
+            return None
+        return path
 
     def ingest_demo(self) -> DemoIngestResponse:
         corpus = self.demo_dir / "corpus"
@@ -229,6 +320,8 @@ class KnowledgeService:
     def delete_document(self, document_id: str) -> bool:
         with self._ingest_lock:
             deleted = self.store.delete_document(document_id)
+            if deleted:
+                self._remove_asset_files(document_id)
             if deleted:
                 self.index.rebuild(self.store.load_chunks())
         return deleted

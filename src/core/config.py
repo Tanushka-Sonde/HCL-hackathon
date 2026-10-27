@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     tavily_api_key: str = ""
     groq_api_key: str = ""
     groq_model_name: str = "llama-3.1-8b-instant"
+    groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     # ── LLM Gateway ──────────────────────────────────────────
     llm_model_name: str = "models/gemini-2.0-flash"
@@ -99,6 +100,9 @@ class Settings(BaseSettings):
     kis_grounding_threshold: float = 0.7
     kis_context_turns: int = 3
     kis_token_expire_minutes: int = 480  # demo-mode login lifetime
+    kis_vision_enabled: bool = True
+    kis_vision_max_pages: int = 30  # vision calls per document
+    kis_table_chunk_max_chars: int = 4000
     llm_price_input_per_1k: float = 0.00005
     llm_price_output_per_1k: float = 0.00008
     prompt_template_version: str = "kis-grounded-v1"

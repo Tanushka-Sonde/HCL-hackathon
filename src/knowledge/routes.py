@@ -33,6 +33,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Form, Query, Request, UploadFile
+from fastapi.responses import FileResponse
 
 from src.core.config import get_settings
 from src.core.exceptions import NotFoundError, ValidationError
@@ -156,6 +157,19 @@ async def query(
     return await svc.query(
         body, correlation_id=getattr(request.state, "request_id", None), user=user
     )
+
+
+@router.get("/assets/{asset_id}")
+async def get_asset(
+    asset_id: str,
+    _: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> FileResponse:
+    """An original image (chart, scanned page, uploaded photo) for citations."""
+    path = svc.asset_path(asset_id)
+    if path is None:
+        raise NotFoundError("Asset", asset_id)
+    return FileResponse(path, media_type="image/png")
 
 
 @router.post("/feedback")

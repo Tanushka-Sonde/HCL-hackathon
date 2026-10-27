@@ -94,6 +94,17 @@ CREATE TABLE IF NOT EXISTS auth_events (
     ts TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_auth_events_ts ON auth_events(ts);
+
+CREATE TABLE IF NOT EXISTS assets (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    page INTEGER,
+    kind TEXT NOT NULL,
+    path TEXT NOT NULL,
+    width INTEGER,
+    height INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_assets_document ON assets(document_id);
 """
 
 # Columns added after the first release; created on startup if missing.
@@ -153,9 +164,12 @@ class KnowledgeStore:
         return dict(row) if row else None
 
     def insert_document(
-        self, doc: dict[str, Any], chunks: list[dict[str, Any]]
+        self,
+        doc: dict[str, Any],
+        chunks: list[dict[str, Any]],
+        assets: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Insert a document and its chunks atomically."""
+        """Insert a document, its chunks and its assets atomically."""
         with self._lock:
             try:
                 self._conn.execute(
@@ -193,6 +207,12 @@ class KnowledgeStore:
                         for c in chunks
                     ],
                 )
+                self._conn.executemany(
+                    """INSERT INTO assets (id, document_id, page, kind, path, width,
+                       height) VALUES (:id, :document_id, :page, :kind, :path,
+                       :width, :height)""",
+                    assets or [],
+                )
                 self._conn.commit()
             except Exception:
                 self._conn.rollback()
@@ -204,6 +224,13 @@ class KnowledgeStore:
                 "SELECT * FROM documents ORDER BY created_at DESC"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_asset(self, asset_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM assets WHERE id = ?", (asset_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
     def list_chunks(self, document_id: str) -> list[dict[str, Any]]:
         """A document's chunks in order, without embeddings (for the viewer)."""

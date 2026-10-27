@@ -21,6 +21,9 @@ tavily-python>=0.5,<1.0
 # Knowledge pipeline
 numpy>=1.26,<3.0
 pypdf>=5.0,<7.0
+# PDF text, tables, page rendering and embedded images (vision OCR / charts)
+pymupdf==2.0
+pillow==13.0.0
 python-docx>=1.1,<2.0
 groq>=0.11,<1.0
 
