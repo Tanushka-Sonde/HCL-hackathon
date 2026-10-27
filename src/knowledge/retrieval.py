@@ -22,6 +22,8 @@ import numpy as np
 from src.knowledge.text import content_tokens, keyword_tokens
 from src.retrieval.service import _reciprocal_rank_fusion
 
+IDF_MIN_CHUNKS = 30
+
 
 class BM25Index:
     """Okapi BM25 over tokenized chunk text (k1=1.5, b=0.75)."""
@@ -40,6 +42,11 @@ class BM25Index:
             term: math.log(1 + (n - freq + 0.5) / (freq + 0.5))
             for term, freq in df.items()
         }
+        # A term that appears nowhere is maximally informative.
+        self._max_idf = math.log(1 + (n + 0.5) / 0.5) if n else 1.0
+
+    def idf(self, term: str) -> float:
+        return self._idf.get(term, self._max_idf)
 
     def scores(self, query_tokens: list[str]) -> list[float]:
         result = []
@@ -180,14 +187,20 @@ class KnowledgeIndex:
                 cands[idx].fused_rank = rank
                 ordered.append(idx)
 
-        # Relevance signals used for the insufficient-evidence decision
+        # Relevance signal for the insufficient-evidence decision: query-term
+        # coverage weighted by IDF, so a missing rare word ("parental") counts
+        # far more than a word found in most chunks ("policy").
+        # IDF is meaningless on a tiny index (2-3 chunks), so small indexes use
+        # plain coverage. 1 + IDF keeps common words worth something.
         q_tokens = set(content_tokens(query))
+        weighted = len(chunks) >= IDF_MIN_CHUNKS
+        weights = {t: (1 + bm25.idf(t)) if weighted else 1.0 for t in q_tokens}
+        total_weight = sum(weights.values())
         for idx in ordered:
             cand = cands[idx]
             p_tokens = set(content_tokens(cand.chunk["index_text"]))
-            cand.coverage = (
-                round(len(q_tokens & p_tokens) / len(q_tokens), 6) if q_tokens else 0.0
-            )
+            matched = sum(weights[t] for t in q_tokens & p_tokens)
+            cand.coverage = round(matched / total_weight, 6) if total_weight else 0.0
 
         if config_id == "B":
             pool = ordered[: max(top_k * 2, 10)]

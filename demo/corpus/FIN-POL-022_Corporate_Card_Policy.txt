@@ -1,0 +1,17 @@
+Doc-ID: FIN-POL-022
+Title: Corporate Card Policy
+Category: Finance
+Version: 1.0
+Status: effective
+Effective: 2025-02-01
+
+SYNTHETIC DEMO DOCUMENT. Orion Synthetic Industries (OSI) is fictional.
+
+1. CARD LIMITS
+Standard corporate cards have a monthly limit of USD 5,000. Senior managers may request a monthly limit of USD 15,000.
+
+2. RECEIPTS
+Card transactions must be reconciled with receipts in the expense system within 15 days of the statement date. Unreconciled transactions after 45 days suspend the card.
+
+3. PROHIBITED USE
+Corporate cards must not be used for personal purchases, cash withdrawals or gift cards.
