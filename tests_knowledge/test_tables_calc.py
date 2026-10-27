@@ -170,3 +170,63 @@ def test_total_profit_last_five_months(
     assert any(
         e.content_type == "table" and e.source_id in cited for e in resp.evidence
     )
+
+
+def test_unformatted_calc_operands_still_ground() -> None:
+    """Live gpt-oss wrote 37000+45000 while the table has 37,000 / 45,000."""
+    ev = Evidence(
+        source_id="S2",
+        chunk_id="c",
+        document_id="d",
+        filename="f.pdf",
+        doc_id="FIN-RPT-010",
+        title="Monthly Profit and Loss Report 2026",
+        content_type="table",
+        content=(
+            "Table: 1. MONTHLY RESULTS (page 1)\n| Month | Profit (USD) |\n| --- | --- |\n"
+            "| Feb 2026 | 37,000 |\n| Mar 2026 | 45,000 |"
+        ),
+        relevance=1.0,
+    )
+    answer, calcs = apply_calcs(
+        "The total profit for Feb and Mar 2026 is {{calc: 37000+45000}} USD [S2]."
+    )
+    assert assess_grounding(answer, [ev], [], calcs)["score"] == 1.0
+
+
+def test_question_words_are_not_claims_but_new_words_are() -> None:
+    ev = Evidence(
+        source_id="S1",
+        chunk_id="c",
+        document_id="d",
+        filename="f.txt",
+        doc_id="D-1",
+        title="T",
+        content="Feb 2026 profit 37,000.",
+        relevance=1.0,
+    )
+    restated = "The total profit of the last month was 37,000 USD [S1]."
+    invented = "Profit was driven by strong sales in Europe and Asia 37,000 [S1]."
+    q = "What was the total profit of the last month?"
+    assert assess_grounding(restated, [ev], [], question=q)["score"] == 1.0
+    assert assess_grounding(invented, [ev], [], question=q)["score"] == 0.0
+
+
+def test_negative_calc_result_is_grounded() -> None:
+    """Live: 'a decrease of -25,000 (= 452000-477000)' was marked unsupported."""
+    ev = Evidence(
+        source_id="S1",
+        chunk_id="c",
+        document_id="d",
+        filename="f.pdf",
+        doc_id="FIN-RPT-011",
+        title="Quarterly Revenue Review 2025",
+        content_type="chart",
+        content="| Q2 2025 | 477000 |\n| Q3 2025 | 452000 |",
+        relevance=1.0,
+    )
+    answer, calcs = apply_calcs(
+        "Revenue in Q3 2025 was 452,000, a change of {{calc: 452000-477000}} from Q2 2025 [S1]."
+    )
+    assert calcs[0]["result"] == "-25,000"
+    assert assess_grounding(answer, [ev], [], calcs)["score"] == 1.0

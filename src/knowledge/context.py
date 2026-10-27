@@ -117,7 +117,7 @@ async def rewrite_with_llm(
     query: str, previous: Turn, settings: Settings
 ) -> tuple[str | None, int, int]:
     """One short LLM call to make a follow-up standalone. (text, in, out tokens)."""
-    from src.knowledge.generation import get_async_client
+    from src.knowledge.generation import get_async_client, model_options
 
     try:
         completion = await get_async_client(settings).chat.completions.create(
@@ -131,7 +131,8 @@ async def rewrite_with_llm(
                 },
             ],
             temperature=0.0,
-            max_tokens=80,
+            max_tokens=200,  # reasoning models also count their thinking here
+            **model_options(settings),
         )
     except Exception as exc:
         logger.warning("kis_context_rewrite_failed", error=str(exc)[:200])

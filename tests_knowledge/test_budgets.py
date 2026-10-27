@@ -38,10 +38,12 @@ def test_estimate_is_chars_over_four() -> None:
 
 def test_budget_keeps_rerank_order_and_drops_the_rest() -> None:
     evidence = [_ev("S1", 2000), _ev("S2", 2000), _ev("S3", 2000)]
-    fit = fit_to_budget("question?", evidence, [], [], max_input_tokens=1400)
+    base = fit_to_budget("question?", [], [], [], 10_000).estimated_input_tokens
+    budget = base + 2 * 560  # room for two ~520-token evidence blocks, not three
+    fit = fit_to_budget("question?", evidence, [], [], max_input_tokens=budget)
     assert [e.source_id for e in fit.evidence] == ["S1", "S2"]
     assert fit.dropped == ["S3"] and fit.truncated is None
-    assert fit.estimated_input_tokens <= 1400
+    assert fit.estimated_input_tokens <= budget
 
 
 def test_first_chunk_is_truncated_when_it_alone_is_too_big() -> None:

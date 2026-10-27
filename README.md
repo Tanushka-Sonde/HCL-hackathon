@@ -131,6 +131,7 @@ cd frontend && npx tsc --noEmit && npm run build
 
 - [docs/HLD.md](docs/HLD.md): high-level design
 - [docs/architecture.md](docs/architecture.md): architecture diagram and design decisions
+- [docs/authentication.md](docs/authentication.md): how sign-in, tokens and roles work in the backend
 - [docs/query_event_schema.md](docs/query_event_schema.md): query event schema and the Success / Partial / Failed rules
 - [reports/evaluation_report.md](reports/evaluation_report.md): latest configuration comparison
 - [README.original.md](README.original.md): the original platform (production path, `DEMO_MODE=false`)

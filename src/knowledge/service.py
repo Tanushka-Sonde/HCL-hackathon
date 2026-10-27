@@ -659,6 +659,14 @@ class KnowledgeService:
                 output_truncated = gen.finish_reason == "length"
                 answer, calculations = apply_calcs(gen.text or INSUFFICIENT_ANSWER)
                 answer, model_chart = extract_chart_block(answer)
+                if not answer.strip() and model_chart:
+                    # The model sent only a chart; describe it with its sources
+                    # so the answer still carries citations.
+                    tags = " ".join(
+                        f"[{s}]" for s in model_chart.get("source_ids") or []
+                    )
+                    title = str(model_chart.get("title") or "Chart")
+                    answer = f"{title} {tags}.".strip() if tags else INSUFFICIENT_ANSWER
                 llm_status = gen.status
                 generation.update(
                     provider=gen.mode,

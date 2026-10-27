@@ -104,9 +104,16 @@ def check_values(
 ) -> list[str]:
     """Values that are neither in the cited sources nor calc results."""
     allowed = _source_numbers(source_ids, evidence, tools)
-    allowed |= {c["result"].replace(",", "") for c in calculations if c.get("result")}
+    allowed |= {
+        c["result"].replace(",", "").lstrip("-")
+        for c in calculations
+        if c.get("result")
+    }
     return [
-        _norm(v) for s in spec["series"] for v in s["values"] if _norm(v) not in allowed
+        _norm(v)
+        for s in spec["series"]
+        for v in s["values"]
+        if _norm(abs(v)) not in allowed  # numbers_in() drops signs
     ]
 
 
@@ -201,43 +208,69 @@ def build_visuals(
     visuals: list[dict[str, Any]] = []
     for ev in evidence:
         if ev.content_type == "chart" and ev.asset_id and ev.source_id in cited:
-            first = ev.content.splitlines()[0] if ev.content else ""
-            title = re.sub(r"^Chart:\s*|\s*\(page \d+\)$", "", first)
-            visuals.append(
-                {
-                    "kind": "retrieved_chart",
-                    "asset_url": f"/api/v1/kis/assets/{ev.asset_id}",
-                    "source_id": ev.source_id,
-                    "doc": ev.doc_id,
-                    "page": ev.page,
-                    "title": title,
-                }
-            )
+            visuals.append(_retrieved(ev))
 
+    # Sources actually returned to the model. A chart's own source list counts
+    # as its citation, as long as it names returned sources.
+    returned = {ev.source_id for ev in evidence} | {
+        tc.source_id for tc in tools if tc.status == "success"
+    }
     rejection = None
-    spec, source_ids = None, []
     if model_spec is not None:
         if "_invalid" in model_spec:
             rejection = {"reason": model_spec["_invalid"]}
         else:
-            source_ids = [s for s in (model_spec.get("source_ids") or []) if s in cited]
+            source_ids = [
+                s for s in (model_spec.get("source_ids") or []) if s in returned
+            ]
             spec = normalize_spec(model_spec)
+            missing = (
+                check_values(spec, source_ids, evidence, tools, calculations)
+                if spec and source_ids
+                else []
+            )
             if spec is None or not source_ids:
-                rejection = {"reason": "chart spec incomplete or cites no valid source"}
-                spec = None
-    if spec is None and rejection is None and PLOT_INTENT_RE.search(question):
-        built = chart_from_sources(question, evidence, tools, cited)
+                rejection = {
+                    "reason": "chart spec incomplete or names no returned source"
+                }
+            elif missing:
+                rejection = {
+                    "reason": "values not found in cited sources",
+                    "values": missing[:10],
+                }
+            else:
+                visuals.append(
+                    {"kind": "generated_chart", "spec": spec, "source_ids": source_ids}
+                )
+                return visuals, None
+    if PLOT_INTENT_RE.search(question):
+        # Built straight from a table or SQL rows; also the fallback when the
+        # model's chart was rejected. Values come from the source itself.
+        built = chart_from_sources(question, evidence, tools, cited or returned)
         if built:
             spec, source_ids = built
-    if spec is not None:
-        missing = check_values(spec, source_ids, evidence, tools, calculations)
-        if missing:
-            rejection = {
-                "reason": "values not found in cited sources",
-                "values": missing[:10],
-            }
-        else:
-            visuals.append(
-                {"kind": "generated_chart", "spec": spec, "source_ids": source_ids}
+            if not check_values(spec, source_ids, evidence, tools, calculations):
+                visuals.append(
+                    {"kind": "generated_chart", "spec": spec, "source_ids": source_ids}
+                )
+        if not any(v["kind"] == "retrieved_chart" for v in visuals):
+            # "Show the revenue chart": return the original chart image even if
+            # the text did not cite it.
+            top_chart = next(
+                (e for e in evidence if e.content_type == "chart" and e.asset_id), None
             )
+            if top_chart is not None:
+                visuals.append(_retrieved(top_chart))
     return visuals, rejection
+
+
+def _retrieved(ev: Evidence) -> dict[str, Any]:
+    first = ev.content.splitlines()[0] if ev.content else ""
+    return {
+        "kind": "retrieved_chart",
+        "asset_url": f"/api/v1/kis/assets/{ev.asset_id}",
+        "source_id": ev.source_id,
+        "doc": ev.doc_id,
+        "page": ev.page,
+        "title": re.sub(r"^Chart:\s*|\s*\(page \d+\)$", "", first),
+    }

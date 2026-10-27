@@ -109,7 +109,9 @@ def _calc_results(
     out = []
     for calc in calculations or []:
         if calc.get("result") is not None:
-            out.append((calc["result"].replace(",", ""), numbers_in(calc["expr"])))
+            # numbers_in() drops signs, so a result of -25,000 is matched as 25000.
+            result = calc["result"].replace(",", "").lstrip("-")
+            out.append((result, numbers_in(calc["expr"])))
     return out
 
 
@@ -131,6 +133,7 @@ def assess_grounding(
     texts = _source_texts(evidence, tools, user_image)
     calcs = _calc_results(calculations)
     given = numbers_in(question or "")
+    question_words = set(content_tokens(question or ""))
     supported: list[str] = []
     unsupported: list[dict[str, str]] = []
     for sentence, tags in _sentences_with_tags(answer):
@@ -146,7 +149,13 @@ def assess_grounding(
             continue
         source = " ".join(texts[sid] for sid in cited)
         source_tokens = set(content_tokens(source))
-        overlap = len(tokens & source_tokens) / len(tokens)
+        # Word overlap measures words only: numbers have their own rule below,
+        # and "37000" vs "37,000" would otherwise tokenize differently.
+        # Words restated from the user's question ("total profit of the last
+        # months") are not new claims, like numbers given in the question.
+        words = {t for t in tokens if not t.isdigit()}
+        known = source_tokens | question_words
+        overlap = len(words & known) / len(words) if words else 1.0
         source_numbers = numbers_in(source)
         derived = {result for result, operands in calcs if operands <= source_numbers}
         missing_numbers = numbers_in(bare) - source_numbers - derived - given
