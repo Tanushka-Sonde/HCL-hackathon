@@ -5,6 +5,19 @@
 
 export const API_BASE_URL = '/api/v1';
 
+/** A useful message when the backend gives no error text of its own. */
+function describeFailure(status: number, detail?: unknown): string {
+  if (status === 404) {
+    // Usually an outdated backend process, or BACKEND_URL pointing elsewhere.
+    return 'The backend does not have this endpoint. Restart the API with the current code (uvicorn src.main:app --port 8000) and check BACKEND_URL.';
+  }
+  if (status >= 500) {
+    return 'The backend is not reachable or failed. Check that the API is running (default http://127.0.0.1:8000) and see its log.';
+  }
+  if (typeof detail === 'string') return detail;
+  return `API request failed (HTTP ${status})`;
+}
+
 export async function fetchApi(endpoint: string, options: RequestInit = {}) {
   const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
   
@@ -49,13 +62,13 @@ export async function fetchApi(endpoint: string, options: RequestInit = {}) {
   if (contentType && contentType.includes('application/json')) {
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.error?.message || 'API request failed');
+      throw new Error(data.error?.message || describeFailure(response.status, data.detail));
     }
     return data;
   }
 
   if (!response.ok) {
-    throw new Error('API request failed');
+    throw new Error(describeFailure(response.status));
   }
 
   return response;
