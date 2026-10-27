@@ -7,6 +7,7 @@ query:   context -> safety precheck -> route -> retrieve/rerank -> tool ->
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import threading
 import time
@@ -275,11 +276,14 @@ class KnowledgeService:
         chunk_injections: list[dict[str, Any]] = []
         tool_calls: list[ToolCall] = []
 
-        def run_retrieval(text: str) -> None:
+        async def run_retrieval(text: str) -> None:
             nonlocal candidates, evidence, evidence_found, top_relevance
             t_r = time.perf_counter()
             try:
-                result = self.index.search(
+                # Off the event loop: the cross-encoder is CPU-bound and would
+                # otherwise stall every other request (e.g. during an eval run).
+                result = await asyncio.to_thread(
+                    self.index.search,
                     text,
                     config_id=req.config_id,
                     reranker=self.reranker,
@@ -308,7 +312,7 @@ class KnowledgeService:
                     if decision.route == "both"
                     else normalized
                 )
-                run_retrieval(docs_query)
+                await run_retrieval(docs_query)
             else:
                 stages["retrieval"] = "not_required"
 
@@ -316,14 +320,17 @@ class KnowledgeService:
             if decision.needs_tool:
                 t_t = time.perf_counter()
                 try:
-                    call = self.tool.run(normalized, source_id="T1")
+                    call = await asyncio.to_thread(
+                        self.tool.run, normalized, source_id="T1"
+                    )
                 except Exception as exc:
                     call = ToolCall(
                         source_id="T1",
                         name="business_sql",
                         template="unknown",
                         status="error",
-                        error=_sanitize_error(exc),
+                        error="The business data source could not be queried.",
+                        error_detail=_sanitize_error(exc),
                         result_summary="tool raised an exception",
                     )
                 tool_calls.append(call)
@@ -336,7 +343,7 @@ class KnowledgeService:
                     router_notes.append(
                         "no SQL template matched; fell back to document retrieval"
                     )
-                    run_retrieval(normalized)
+                    await run_retrieval(normalized)
             else:
                 stages["tool"] = "not_required"
 
@@ -450,16 +457,18 @@ class KnowledgeService:
         confidence = confidence_for(outcome, grounding["score"], top_relevance)
         total_ms = _ms(t_start)
 
-        self.memory.add(
-            session_id,
-            Turn(
-                query_id=query_id,
-                query=req.query,
-                normalized=normalized,
-                answer=answer,
-                route=decision.route,
-            ),
-        )
+        # A blocked injection attempt never becomes context for later turns.
+        if not injection_blocked:
+            self.memory.add(
+                session_id,
+                Turn(
+                    query_id=query_id,
+                    query=req.query,
+                    normalized=normalized,
+                    answer=answer,
+                    route=decision.route,
+                ),
+            )
 
         safety = {
             "query_injection": query_injection,
@@ -576,7 +585,9 @@ class KnowledgeService:
             route=decision.route,  # type: ignore[arg-type]
             citations=citations,
             evidence=evidence,
-            tool_calls=tool_calls,
+            tool_calls=[
+                tc.model_copy(update={"error_detail": None}) for tc in tool_calls
+            ],
             conflicts=conflicts,
             safety=safety,
             grounding_score=grounding["score"],

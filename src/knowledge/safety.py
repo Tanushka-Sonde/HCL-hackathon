@@ -28,6 +28,16 @@ INJECTION_PATTERNS: dict[str, re.Pattern[str]] = {
     "jailbreak": re.compile(
         r"\b(jailbreak|do anything now|DAN mode|developer mode)\b", re.I
     ),
+    "new_rule": re.compile(r"\bnew (rule|instruction|directive)s?\s*:", re.I),
+    "persistent_override": re.compile(
+        r"\bfrom now on\b[^.]{0,60}\b(answer|respond|reply|say|output|ignore)\b"
+        r"|\b(answer|respond|reply|say|output)\b[^.]{0,60}\bfrom now on\b",
+        re.I,
+    ),
+    "role_tag": re.compile(
+        r"(?:^|\n)\s*(system|developer)\s*:|<\|?(system|im_start)\|?>", re.I
+    ),
+    "imperative_to_ai": re.compile(r"\byou must now\b", re.I),
     "directive_to_ai": re.compile(
         r"\b(AI|assistant|language model|LLM|chatbot)s?\b[^.]{0,30}\b(must|should|shall) (now )?(respond|reply|say|answer|output)",
         re.I,

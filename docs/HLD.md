@@ -4,7 +4,7 @@
 |---|---|
 | **Project** | AI-Powered Enterprise Knowledge Intelligence Assistant (HCL Tech AI Engineer hackathon) |
 | **Base codebase** | `ai_research_platform` (FastAPI + Next.js + PostgreSQL/pgvector), extended rather than rebuilt |
-| **Sources** | Hackathon brief (*AI-Powered Enterprise Knowledge Intelligence Assistant*, §1–12), team execution plan (`CLAUDE.md`), repository code as of 2026-10-27 |
+| **Sources** | Hackathon brief (*AI-Powered Enterprise Knowledge Intelligence Assistant*, §1–12), the team's hackathon execution plan (kept outside the repository), repository code as of 2026-10-27 |
 | **Related docs** | [architecture.md](architecture.md) · [query_event_schema.md](query_event_schema.md) · [evaluation_report.md](../reports/evaluation_report.md) · [README.original.md](../README.original.md) |
 
 ---

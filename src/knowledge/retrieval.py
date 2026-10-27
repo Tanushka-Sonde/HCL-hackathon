@@ -88,19 +88,26 @@ class KnowledgeIndex:
     def __init__(self, embedder: Any, is_semantic: bool) -> None:
         self._embedder = embedder
         self._is_semantic = is_semantic
-        self.chunks: list[dict[str, Any]] = []
-        self._matrix = np.zeros((0, 1), dtype=np.float32)
-        self._bm25 = BM25Index([])
+        self._state: tuple[list[dict[str, Any]], np.ndarray, BM25Index] = (
+            [],
+            np.zeros((0, 1), dtype=np.float32),
+            BM25Index([]),
+        )
 
     def rebuild(self, chunks: list[dict[str, Any]]) -> None:
-        self.chunks = chunks
-        if chunks:
-            self._matrix = np.asarray(
-                [c["embedding"] for c in chunks], dtype=np.float32
-            )
-        else:
-            self._matrix = np.zeros((0, 1), dtype=np.float32)
-        self._bm25 = BM25Index([keyword_tokens(c["index_text"]) for c in chunks])
+        # Build everything first, then swap in one assignment, so a concurrent
+        # search never sees chunks, matrix and BM25 from different versions.
+        matrix = (
+            np.asarray([c["embedding"] for c in chunks], dtype=np.float32)
+            if chunks
+            else np.zeros((0, 1), dtype=np.float32)
+        )
+        bm25 = BM25Index([keyword_tokens(c["index_text"]) for c in chunks])
+        self._state = (chunks, matrix, bm25)
+
+    @property
+    def chunks(self) -> list[dict[str, Any]]:
+        return self._state[0]
 
     def __len__(self) -> int:
         return len(self.chunks)
@@ -118,9 +125,10 @@ class KnowledgeIndex:
         candidate_pool: int = 20,
     ) -> RetrievalResult:
         """Run configuration A or B and return scored candidates."""
+        chunks, matrix, bm25 = self._state  # one consistent snapshot
         allowed = [
             i
-            for i, c in enumerate(self.chunks)
+            for i, c in enumerate(chunks)
             if (not category or (c.get("category") or "").lower() == category.lower())
             and (not status or (c.get("status") or "").lower() == status.lower())
         ]
@@ -129,38 +137,38 @@ class KnowledgeIndex:
 
         # Dense retrieval
         q_vec = np.asarray(self._embedder.encode([query])[0], dtype=np.float32)
-        sims = self._matrix[allowed] @ q_vec
+        sims = matrix[allowed] @ q_vec
         dense_order = np.argsort(-sims)[:candidate_pool]
         dense = [(allowed[j], float(sims[j])) for j in dense_order]
 
         cands: dict[int, Candidate] = {}
         for rank, (idx, score) in enumerate(dense, start=1):
             cands[idx] = Candidate(
-                self.chunks[idx], vector_score=round(score, 6), vector_rank=rank
+                chunks[idx], vector_score=round(score, 6), vector_rank=rank
             )
 
         if config_id == "A":
             ordered = [idx for idx, _ in dense]
         else:
             # Sparse retrieval (BM25)
-            bm25_all = self._bm25.scores(keyword_tokens(query))
+            bm25_all = bm25.scores(keyword_tokens(query))
             sparse = sorted(
                 ((i, bm25_all[i]) for i in allowed if bm25_all[i] > 0),
                 key=lambda x: x[1],
                 reverse=True,
             )[:candidate_pool]
             for rank, (idx, score) in enumerate(sparse, start=1):
-                cand = cands.setdefault(idx, Candidate(self.chunks[idx]))
+                cand = cands.setdefault(idx, Candidate(chunks[idx]))
                 cand.bm25_score = round(score, 6)
                 cand.bm25_rank = rank
 
             # Reciprocal Rank Fusion (shared with the PostgreSQL retrieval path)
             fused = _reciprocal_rank_fusion(
-                [self._rrf_row(i) for i, _ in dense],
-                [self._rrf_row(i) for i, _ in sparse],
+                [_rrf_row(chunks[i]) for i, _ in dense],
+                [_rrf_row(chunks[i]) for i, _ in sparse],
                 top_k=candidate_pool,
             )
-            id_to_idx = {c["chunk_id"]: i for i, c in enumerate(self.chunks)}
+            id_to_idx = {c["chunk_id"]: i for i, c in enumerate(chunks)}
             ordered = []
             for rank, item in enumerate(fused, start=1):
                 idx = id_to_idx[str(item.chunk_id)]
@@ -218,14 +226,14 @@ class KnowledgeIndex:
             evidence_found=top_rel >= min_relevance,
         )
 
-    def _rrf_row(self, idx: int) -> dict[str, Any]:
-        """Row shape expected by ``_reciprocal_rank_fusion``."""
-        c = self.chunks[idx]
-        return {
-            "chunk_id": uuid.UUID(c["chunk_id"]),
-            "document_id": uuid.UUID(c["document_id"]),
-            "content": c["content"],
-            "chunk_index": c["chunk_index"],
-            "page_number": c.get("page"),
-            "document_filename": c["document_filename"],
-        }
+
+def _rrf_row(c: dict[str, Any]) -> dict[str, Any]:
+    """Row shape expected by ``_reciprocal_rank_fusion``."""
+    return {
+        "chunk_id": uuid.UUID(c["chunk_id"]),
+        "document_id": uuid.UUID(c["document_id"]),
+        "content": c["content"],
+        "chunk_index": c["chunk_index"],
+        "page_number": c.get("page"),
+        "document_filename": c["document_filename"],
+    }

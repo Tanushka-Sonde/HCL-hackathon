@@ -81,6 +81,7 @@ class ToolCall(BaseModel):
     result_summary: str = ""
     rows: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
+    error_detail: str | None = None
     simulated_failure: bool = False
 
 
