@@ -68,6 +68,10 @@ class Evidence(BaseModel):
     page: int | None = None
     section: str | None = None
     content: str
+    content_type: str = "text"
+    source_method: str = "plain"
+    asset_id: str | None = None
+    bbox: list[float] | None = None
     vector_score: float | None = None
     vector_rank: int | None = None
     bm25_score: float | None = None
@@ -164,6 +168,9 @@ class DocumentInfo(BaseModel):
     pages: int | None
     chunk_count: int
     created_at: str
+    uploaded_by: str | None = None
+    vision_input_tokens: int = 0
+    vision_output_tokens: int = 0
 
 
 class IngestResponse(BaseModel):
@@ -171,6 +178,8 @@ class IngestResponse(BaseModel):
 
     document: DocumentInfo
     duplicate: bool = False
+    skipped_pages: list[int] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DemoIngestResponse(BaseModel):

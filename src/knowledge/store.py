@@ -99,6 +99,17 @@ CREATE INDEX IF NOT EXISTS ix_auth_events_ts ON auth_events(ts);
 # Columns added after the first release; created on startup if missing.
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "feedback": {"user_id": "TEXT"},
+    "documents": {
+        "uploaded_by": "TEXT",
+        "vision_input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "vision_output_tokens": "INTEGER NOT NULL DEFAULT 0",
+    },
+    "chunks": {
+        "content_type": "TEXT NOT NULL DEFAULT 'text'",
+        "source_method": "TEXT NOT NULL DEFAULT 'plain'",
+        "asset_id": "TEXT",
+        "bbox": "TEXT",
+    },
 }
 
 # Public user fields. password_hash is deliberately absent: no API returns it.
@@ -150,18 +161,37 @@ class KnowledgeStore:
                 self._conn.execute(
                     """INSERT INTO documents (id, filename, doc_id, title, category,
                        version, status, effective_date, mime_type, size_bytes, pages,
-                       chunk_count, content_hash, created_at)
+                       chunk_count, content_hash, created_at, uploaded_by,
+                       vision_input_tokens, vision_output_tokens)
                        VALUES (:id, :filename, :doc_id, :title, :category, :version,
                        :status, :effective_date, :mime_type, :size_bytes, :pages,
-                       :chunk_count, :content_hash, :created_at)""",
-                    doc,
+                       :chunk_count, :content_hash, :created_at, :uploaded_by,
+                       :vision_input_tokens, :vision_output_tokens)""",
+                    {
+                        "uploaded_by": None,
+                        "vision_input_tokens": 0,
+                        "vision_output_tokens": 0,
+                        **doc,
+                    },
                 )
                 self._conn.executemany(
                     """INSERT INTO chunks (id, document_id, chunk_index, page, section,
-                       content, index_text, embedding)
+                       content, index_text, embedding, content_type, source_method,
+                       asset_id, bbox)
                        VALUES (:id, :document_id, :chunk_index, :page, :section,
-                       :content, :index_text, :embedding)""",
-                    [{**c, "embedding": json.dumps(c["embedding"])} for c in chunks],
+                       :content, :index_text, :embedding, :content_type,
+                       :source_method, :asset_id, :bbox)""",
+                    [
+                        {
+                            "content_type": "text",
+                            "source_method": "plain",
+                            "asset_id": None,
+                            **c,
+                            "embedding": json.dumps(c["embedding"]),
+                            "bbox": json.dumps(c["bbox"]) if c.get("bbox") else None,
+                        }
+                        for c in chunks
+                    ],
                 )
                 self._conn.commit()
             except Exception:
@@ -172,6 +202,17 @@ class KnowledgeStore:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM documents ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_chunks(self, document_id: str) -> list[dict[str, Any]]:
+        """A document's chunks in order, without embeddings (for the viewer)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, chunk_index, page, section, content, content_type,
+                          source_method, asset_id
+                   FROM chunks WHERE document_id = ? ORDER BY chunk_index""",
+                (document_id,),
             ).fetchall()
         return [dict(r) for r in rows]
 
@@ -189,6 +230,7 @@ class KnowledgeStore:
             rows = self._conn.execute(
                 """SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.page,
                           c.section, c.content, c.index_text, c.embedding,
+                          c.content_type, c.source_method, c.asset_id, c.bbox,
                           d.filename AS document_filename, d.doc_id, d.title,
                           d.category, d.version, d.status
                    FROM chunks c JOIN documents d ON c.document_id = d.id
@@ -198,6 +240,7 @@ class KnowledgeStore:
         for r in rows:
             item = dict(r)
             item["embedding"] = json.loads(item["embedding"])
+            item["bbox"] = json.loads(item["bbox"]) if item["bbox"] else None
             result.append(item)
         return result
 

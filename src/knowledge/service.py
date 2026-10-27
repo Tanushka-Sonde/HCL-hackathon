@@ -137,9 +137,18 @@ class KnowledgeService:
 
     # ── Ingestion ────────────────────────────────────────────
 
-    def ingest(self, filename: str, content: bytes) -> IngestResponse:
+    def ingest(
+        self,
+        filename: str,
+        content: bytes,
+        metadata: dict[str, str | None] | None = None,
+        uploaded_by: str | None = None,
+    ) -> IngestResponse:
         parsed = parse_document(
-            filename, content, self.settings.kis_max_upload_mb * 1_048_576
+            filename,
+            content,
+            self.settings.kis_max_upload_mb * 1_048_576,
+            overrides=metadata,
         )
         content_hash = hashlib.sha256(content).hexdigest()
         with self._ingest_lock:
@@ -165,6 +174,9 @@ class KnowledgeService:
                 "pages": parsed.pages,
                 "content_hash": content_hash,
                 "created_at": _now(),
+                "uploaded_by": uploaded_by,
+                "vision_input_tokens": parsed.vision_input_tokens,
+                "vision_output_tokens": parsed.vision_output_tokens,
             }
             header = (
                 f"{doc['title']} ({doc['doc_id']}) version {doc['version'] or 'n/a'} "
@@ -183,6 +195,10 @@ class KnowledgeService:
                             "section": unit.section,
                             "content": piece,
                             "index_text": f"{header}{section}\n{piece}",
+                            "content_type": unit.content_type,
+                            "source_method": unit.source_method,
+                            "asset_id": unit.asset_id,
+                            "bbox": unit.bbox,
                         }
                     )
             embeddings = self.embedder.encode([c["index_text"] for c in chunks])
@@ -641,6 +657,10 @@ class KnowledgeService:
                     page=c.get("page"),
                     section=c.get("section"),
                     content=clean.text,
+                    content_type=c.get("content_type") or "text",
+                    source_method=c.get("source_method") or "plain",
+                    asset_id=c.get("asset_id"),
+                    bbox=c.get("bbox"),
                     vector_score=cand.vector_score,
                     vector_rank=cand.vector_rank,
                     bm25_score=cand.bm25_score,

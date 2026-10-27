@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     # hybrid retrieval) without PostgreSQL, MinIO, Redis or Google OAuth.
     demo_mode: bool = True
     kis_data_dir: str = "data"
-    kis_max_upload_mb: int = 10
+    kis_max_upload_mb: int = 20
     kis_chunk_size: int = 800
     kis_chunk_overlap: int = 120
     kis_embedder: str = "sentence-transformers"  # or "hashing"

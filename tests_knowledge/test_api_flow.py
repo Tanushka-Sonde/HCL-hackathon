@@ -202,3 +202,28 @@ def test_blocked_query_not_kept_as_context(client: TestClient, service) -> None:
     )
     admin_id = service.store.get_user_credentials("admin")["id"]
     assert service.memory.history(f"{admin_id}:s-blk") == []
+
+
+def test_upload_with_metadata_fields_and_chunk_viewer(client: TestClient) -> None:
+    resp = client.post(
+        "/api/v1/kis/ingest",
+        files={
+            "file": (
+                "remote_work_guidelines.txt",
+                b"Remote work is allowed two days a week with manager approval.",
+                "text/plain",
+            )
+        },
+        data={"category": "HR", "version": "1.2", "status": "effective"},
+    )
+    assert resp.status_code == 201, resp.text
+    doc = resp.json()["document"]
+    assert doc["doc_id"] == "REMOTE-WORK-GUIDELINES"
+    assert (doc["category"], doc["version"], doc["status"]) == (
+        "HR",
+        "1.2",
+        "effective",
+    )
+    assert doc["uploaded_by"]
+    chunks = client.get(f"/api/v1/kis/documents/{doc['id']}/chunks").json()
+    assert chunks[0]["content_type"] == "text" and chunks[0]["source_method"] == "plain"

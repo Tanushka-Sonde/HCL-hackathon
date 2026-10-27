@@ -32,7 +32,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, Query, Request, UploadFile
 
 from src.core.config import get_settings
 from src.core.exceptions import NotFoundError, ValidationError
@@ -40,6 +40,7 @@ from src.core.logging import get_logger
 from src.knowledge.auth import CurrentUser  # noqa: TC001 - FastAPI resolves it at runtime
 from src.knowledge.evaluation import run_evaluation
 from src.knowledge.metrics import compute_metrics, summarize_event
+from src.knowledge.parsing import file_too_large_message
 from src.knowledge.schemas import (
     DemoIngestResponse,
     DocumentInfo,
@@ -179,16 +180,28 @@ async def feedback(
 @router.post("/ingest", response_model=IngestResponse, status_code=201)
 async def ingest(
     file: UploadFile,
-    _: CurrentUser = Depends(admin_user),
+    category: str | None = Form(default=None, max_length=50),
+    version: str | None = Form(default=None, max_length=20),
+    status: str | None = Form(default=None, max_length=20),
+    effective_date: str | None = Form(default=None, max_length=10),
+    user: CurrentUser = Depends(admin_user),
     svc: KnowledgeService = Depends(get_service),
 ) -> IngestResponse:
     limit = svc.settings.kis_max_upload_mb * 1_048_576
+    if file.size is not None and file.size > limit:
+        raise ValidationError(file_too_large_message(file.size, limit))
     content = await file.read(limit + 1)
     if len(content) > limit:
-        raise ValidationError(
-            f"File exceeds the {svc.settings.kis_max_upload_mb} MB limit."
-        )
-    return await asyncio.to_thread(svc.ingest, file.filename or "untitled.txt", content)
+        raise ValidationError(file_too_large_message(len(content), limit))
+    metadata = {
+        "category": category,
+        "version": version,
+        "status": status,
+        "effective": effective_date,
+    }
+    return await asyncio.to_thread(
+        svc.ingest, file.filename or "untitled.txt", content, metadata, user.id
+    )
 
 
 @router.post("/ingest/demo", response_model=DemoIngestResponse)
@@ -205,6 +218,16 @@ async def list_documents(
     svc: KnowledgeService = Depends(get_service),
 ) -> list[DocumentInfo]:
     return svc.list_documents()
+
+
+@router.get("/documents/{document_id}/chunks")
+async def document_chunks(
+    document_id: str,
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """What chunking produced for one document (page, section, type)."""
+    return svc.store.list_chunks(document_id)
 
 
 @router.delete("/documents/{document_id}", status_code=204)

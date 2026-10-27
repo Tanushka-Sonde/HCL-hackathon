@@ -341,3 +341,48 @@ def test_outcome_rules() -> None:
         "partial",
         ["TOOL_FAILED_PARTIAL"],
     )
+
+
+# ── Upload validation and metadata (WP-2) ───────────────────
+
+
+def test_distinct_rejection_messages() -> None:
+    limit = 20 * MB
+    with pytest.raises(
+        ValidationError, match=r"too large \(25\.0 MB\)\. Limit is 20 MB"
+    ):
+        parse_document("big.txt", b"x" * (25 * MB), limit)
+    with pytest.raises(ValidationError, match=r"Unsupported file type '.exe'"):
+        parse_document("tool.exe", b"MZ\x90\x00", limit)
+    with pytest.raises(ValidationError, match="executable program"):
+        parse_document("report.pdf", b"MZ\x90\x00\x03\x00", limit)
+    with pytest.raises(ValidationError, match="not a valid JPEG image"):
+        parse_document("photo.jpg", b"%PDF-1.4 fake", limit)
+
+
+def test_form_metadata_overrides_header() -> None:
+    text = b"Doc-ID: OPS-POL-001\nStatus: draft\nVersion: 1.0\n\nShift handover rules for operations staff."
+    parsed = parse_document(
+        "ops.txt", text, MB, overrides={"status": "Effective", "version": "2.1"}
+    )
+    assert parsed.metadata["status"] == "effective"
+    assert parsed.metadata["version"] == "2.1"
+    assert parsed.metadata["doc-id"] == "OPS-POL-001"  # header kept when not overridden
+    with pytest.raises(ValidationError, match="Status must be one of"):
+        parse_document("ops.txt", text, MB, overrides={"status": "archived"})
+    with pytest.raises(ValidationError, match="YYYY-MM-DD"):
+        parse_document("ops.txt", text, MB, overrides={"effective": "27/10/2026"})
+
+
+@pytest.mark.parametrize(
+    ("filename", "doc_id"),
+    [
+        ("TRV-POL-003_Travel_Expense_Policy.pdf", "TRV-POL-003"),
+        ("remote_work_guidelines.txt", "REMOTE-WORK-GUIDELINES"),
+        ("Q3 report.md", "Q3-REPORT"),
+    ],
+)
+def test_doc_id_from_filename(filename: str, doc_id: str) -> None:
+    from src.knowledge.parsing import doc_id_from_filename
+
+    assert doc_id_from_filename(filename) == doc_id
