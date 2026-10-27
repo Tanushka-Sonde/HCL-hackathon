@@ -168,3 +168,46 @@ Backend and frontend run as two services; data lives in the `kis-data` volume an
 - The JWT is kept in `localStorage` (as the existing client did); an httpOnly cookie would be safer against XSS.
 - The index lives in memory (rebuilt from SQLite at start-up). Conversation memory is per process, so a restart drops follow-up context.
 - Without a key, the cost KPI is zero; with a key it is an estimate from configured prices.
+
+
+
+
+Project Assumptions
+
+Purpose: The project is an internal knowledge assistant for finding and understanding organizational information. It is not intended to be a general-purpose chatbot.
+
+Target users: Employees use the assistant to ask questions and review their own query history. Administrators manage documents, users, evaluation runs, and observability.
+
+Primary use cases: Users need to look up policies, procedures, technical guidance, and selected business facts; compare document versions; and combine document evidence with structured business data when supported.
+
+Trusted sources: Answers should be based on organization-approved documents and the configured business dataset. The assistant should cite its sources and decline when evidence is missing or conflicting.
+
+Data scope: The demo uses synthetic company data. A real deployment would require an organization to supply and govern its own approved documents and structured data; confidential or regulated data is outside the demo’s intended scope.
+
+Supported workflows: The initial scope covers document questions, allowlisted business lookups, and questions that combine those sources. It does not include arbitrary database queries or unrestricted access to enterprise systems.
+
+User access: The project assumes two main roles: employee and administrator. Employees see only their own history and permitted answers; administrators have broader management and diagnostic access.
+
+Interaction model: The primary experience is a browser-based assistant. Document and image ingestion are administrative workflows; image understanding depends on the configured vision service.
+
+AI behavior: External language and vision models may be unavailable. The project therefore assumes transparent fallbacks are acceptable, even when they provide less capable answers than the hosted models.
+
+Deployment and scale: The current implementation is a hackathon/demo MVP intended for low-volume evaluation, not a production service with defined availability, throughput, or support guarantees.
+
+Success criteria: Trustworthiness, traceable answers, safe handling of insufficient evidence, and useful administration are more important than answering every question.
+
+Limitations
+
+LLM and vision behavior isn’t live-verified. Groq generation, OCR, chart reading, and image questions were tested with stubs, not against the live API. Without a Groq key, the app uses extractive answers and skips vision features.
+SQL coverage is narrow. Queries resolve project IDs, not project names; for example, “Project Atlas” won’t resolve to its SQL record.
+Routing and grounding use rules. Some paraphrased questions fall below the evidence threshold even with semantic embeddings.
+PII masking is pattern-based. It masks configured identifiers and salary patterns, but not people’s names; data is unmasked at ingestion, and admins see raw values.
+The demo is single-process. The retrieval index is rebuilt in memory from SQLite at startup, and conversation context is process-local, so restarts drop follow-up context.
+Local authentication needs configuration for persistence. In this run, JWT_SECRET_KEY was unset, so the app generated a per-process secret; restarting the backend invalidates existing tokens. The frontend stores JWTs in localStorage.
+Cost reporting is approximate. It reports zero without an LLM key and estimates cost from configured prices when a key is used.
+The production path wasn’t validated here. PostgreSQL, MinIO, multi-tenant RLS, and deployment behavior are separate from the local demo path.
+Current test caveat: the run had 161 passing tests and one failure: test_off_hours puts the event just before the configured window. The frontend install also reported 6 dependency advisories: 5 high and 1 critical
+
+
+Example:
+“What is the remaining budget of PRJ-1002 and does a USD 20,000 purchase need CFO approval?”
