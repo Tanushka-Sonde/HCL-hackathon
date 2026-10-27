@@ -110,6 +110,14 @@ CREATE INDEX IF NOT EXISTS ix_assets_document ON assets(document_id);
 # Columns added after the first release; created on startup if missing.
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "feedback": {"user_id": "TEXT"},
+    "query_events": {
+        "user_id": "TEXT",
+        "username": "TEXT",
+        "role": "TEXT",
+        "input_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "output_tokens": "INTEGER NOT NULL DEFAULT 0",
+        "cost_usd": "REAL NOT NULL DEFAULT 0",
+    },
     "documents": {
         "uploaded_by": "TEXT",
         "vision_input_tokens": "INTEGER NOT NULL DEFAULT 0",
@@ -150,6 +158,12 @@ class KnowledgeStore:
             for name, decl in columns.items():
                 if name not in existing:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_events_user ON query_events(user_id)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_events_session ON query_events(session_id)"
+        )
 
     def close(self) -> None:
         self._conn.close()
@@ -275,11 +289,13 @@ class KnowledgeStore:
 
     def insert_event(self, event: dict[str, Any]) -> None:
         identity = event["identity"]
+        usage = event.get("usage") or {}
         with self._lock:
             self._conn.execute(
                 """INSERT INTO query_events (query_id, ts, session_id, config_id,
-                   outcome, total_ms, eval_run_id, payload)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   outcome, total_ms, eval_run_id, payload, user_id, username, role,
+                   input_tokens, output_tokens, cost_usd)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     identity["query_id"],
                     identity["timestamp"],
@@ -289,6 +305,12 @@ class KnowledgeStore:
                     event["performance"]["total_ms"],
                     (event.get("eval") or {}).get("run_id"),
                     json.dumps(event, default=str),
+                    identity.get("user_id"),
+                    identity.get("username"),
+                    identity.get("role"),
+                    usage.get("input_tokens", 0),
+                    usage.get("output_tokens", 0),
+                    usage.get("estimated_cost_usd", 0.0),
                 ),
             )
             self._conn.commit()
@@ -326,10 +348,18 @@ class KnowledgeStore:
         since: str | None = None,
         include_eval: bool = True,
         limit: int | None = None,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return event payloads (newest first) matching the filters."""
         clauses: list[str] = []
         params: list[Any] = []
+        if user_id:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
         if config_id:
             clauses.append("config_id = ?")
             params.append(config_id)

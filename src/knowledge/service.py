@@ -13,13 +13,15 @@ import shutil
 import threading
 import time
 import uuid
-from datetime import UTC, datetime
+from collections import Counter
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src.core.exceptions import AuthorizationError
 from src.core.logging import get_logger
 from src.ingestion.pipeline import RecursiveTextChunker
+from src.knowledge.anomaly import detect_anomalies
 from src.knowledge.auth import SYSTEM_EVAL_USER, AuthService, CurrentUser
 from src.knowledge.calc import apply_calcs
 from src.knowledge.context import (
@@ -875,6 +877,115 @@ class KnowledgeService:
         return evidence
 
     # ── Feedback ─────────────────────────────────────────────
+
+    # ── Per-user analytics (admin) and own history (user) ────
+
+    def anomalies(self, since_hours: float = 24) -> list[dict[str, Any]]:
+        since = (datetime.now(UTC) - timedelta(days=8)).isoformat(
+            timespec="milliseconds"
+        )
+        return detect_anomalies(
+            self.store.list_events(since=since, include_eval=False),
+            self.store.list_auth_events(since=since),
+            self.settings,
+            since_hours=since_hours,
+        )
+
+    def user_summaries(self) -> list[dict[str, Any]]:
+        flags: dict[str, set[str]] = {}
+        for finding in self.anomalies(24):
+            key = finding.get("user_id") or finding.get("username") or ""
+            flags.setdefault(key, set()).add(finding["rule"])
+        events = self.store.list_events(include_eval=False)
+        sessions = self.store.list_sessions()
+        out = []
+        for user in self.store.list_users():
+            evs = [e for e in events if e["identity"].get("user_id") == user["id"]]
+            outcomes = Counter(e["outcome"]["status"] for e in evs)
+            usage = [e.get("usage") or {} for e in evs]
+            out.append(
+                {
+                    **user,
+                    "queries": len(evs),
+                    "sessions": sum(1 for x in sessions if x["user_id"] == user["id"]),
+                    "input_tokens": sum(u.get("input_tokens", 0) for u in usage),
+                    "output_tokens": sum(u.get("output_tokens", 0) for u in usage),
+                    "cost_usd": round(
+                        sum(u.get("estimated_cost_usd", 0) for u in usage), 6
+                    ),
+                    "outcomes": {
+                        k: outcomes.get(k, 0) for k in ("success", "partial", "failed")
+                    },
+                    "safety_events": sum(1 for e in evs if e["safety"].get("events")),
+                    "last_active": evs[0]["identity"]["timestamp"] if evs else None,
+                    "anomalies": sorted(
+                        flags.get(user["id"], set())
+                        | flags.get(user["username"], set())
+                    ),
+                }
+            )
+        return out
+
+    def session_rows(self, user_id: str, *, masked: bool) -> list[dict[str, Any]]:
+        """Sessions with token totals. ``masked`` hides PII in the preview text."""
+        events = self.store.list_events(user_id=user_id, include_eval=False)
+        rows = []
+        for sess in self.store.list_sessions(user_id):
+            evs = [
+                e for e in events if e["identity"]["session_id"] == sess["session_id"]
+            ]
+            if not evs:
+                continue
+            first = evs[-1]["question"]["original"]
+            rows.append(
+                {
+                    **sess,
+                    "title": mask_for_user(first)[0] if masked else first,
+                    "input_tokens": sum(
+                        (e.get("usage") or {}).get("input_tokens", 0) for e in evs
+                    ),
+                    "output_tokens": sum(
+                        (e.get("usage") or {}).get("output_tokens", 0) for e in evs
+                    ),
+                    "cost_usd": round(
+                        sum(
+                            (e.get("usage") or {}).get("estimated_cost_usd", 0)
+                            for e in evs
+                        ),
+                        6,
+                    ),
+                }
+            )
+        return rows
+
+    def transcript(
+        self, session_id: str, *, masked: bool, user_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """A session's turns, oldest first. Users get answers re-masked."""
+        events = self.store.list_events(session_id=session_id, user_id=user_id)
+        turns = []
+        for e in reversed(events):
+            answer = e["generation"].get("output") or ""
+            usage = e.get("usage") or {}
+            turns.append(
+                {
+                    "query_id": e["identity"]["query_id"],
+                    "timestamp": e["identity"]["timestamp"],
+                    "username": e["identity"].get("username"),
+                    "query": mask_for_user(e["question"]["original"])[0]
+                    if masked
+                    else e["question"]["original"],
+                    "answer": mask_for_user(answer)[0] if masked else answer,
+                    "outcome": e["outcome"]["status"],
+                    "reason_codes": e["outcome"]["reason_codes"],
+                    "citations": len(e.get("citations") or []),
+                    "input_tokens": usage.get("input_tokens", 0),
+                    "output_tokens": usage.get("output_tokens", 0),
+                    "cost_usd": usage.get("estimated_cost_usd", 0),
+                    "feedback": e.get("feedback"),
+                }
+            )
+        return turns
 
     def add_feedback(
         self,

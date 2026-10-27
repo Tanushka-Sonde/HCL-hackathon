@@ -139,6 +139,82 @@ async def create_user(
     return UserInfo(**user)
 
 
+@router.get("/admin/users/summary")
+async def users_summary(
+    _: CurrentUser = Depends(admin_user), svc: KnowledgeService = Depends(get_service)
+) -> list[dict[str, Any]]:
+    """Per user: queries, sessions, tokens, cost, outcomes, anomaly flags."""
+    return await asyncio.to_thread(svc.user_summaries)
+
+
+@router.get("/admin/users/{user_id}/sessions")
+async def user_sessions(
+    user_id: str,
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    if svc.store.get_user(user_id) is None:
+        raise NotFoundError("User", user_id)
+    return svc.session_rows(user_id, masked=False)
+
+
+@router.get("/admin/sessions/{session_id}")
+async def session_transcript(
+    session_id: str,
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    """Full raw transcript with per-turn tokens and outcome (admin)."""
+    turns = svc.transcript(session_id, masked=False)
+    if not turns:
+        raise NotFoundError("Session", session_id)
+    return turns
+
+
+@router.get("/admin/anomalies")
+async def anomalies(
+    since_hours: float = Query(default=24, gt=0, le=24 * 30),
+    _: CurrentUser = Depends(admin_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    return await asyncio.to_thread(svc.anomalies, since_hours)
+
+
+# ── Own history (any role) ───────────────────────────────────
+
+
+@router.get("/my/sessions")
+async def my_sessions(
+    user: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> list[dict[str, Any]]:
+    return svc.session_rows(user.id, masked=not user.is_admin)
+
+
+@router.get("/my/history")
+async def my_history(
+    session_id: str | None = Query(default=None, max_length=64),
+    user: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> dict[str, Any]:
+    """Your own sessions and turns (masked for users) and token usage."""
+    sessions = svc.session_rows(user.id, masked=not user.is_admin)
+    turns = (
+        svc.transcript(session_id, masked=not user.is_admin, user_id=user.id)
+        if session_id
+        else []
+    )
+    return {
+        "sessions": sessions,
+        "turns": turns,
+        "usage": {
+            "input_tokens": sum(s["input_tokens"] for s in sessions),
+            "output_tokens": sum(s["output_tokens"] for s in sessions),
+            "cost_usd": round(sum(s["cost_usd"] for s in sessions), 6),
+        },
+    }
+
+
 # ── Assistant (any role) ─────────────────────────────────────
 
 
@@ -263,6 +339,7 @@ def _filtered_events(
     since_hours: float | None,
     include_eval: bool,
     limit: int | None = None,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     since = None
     if since_hours is None and svc.store.count_events() > LARGE_EVENT_COUNT:
@@ -278,6 +355,7 @@ def _filtered_events(
         since=since,
         include_eval=include_eval,
         limit=limit,
+        user_id=user_id,
     )
 
 
@@ -287,10 +365,13 @@ async def metrics(
     outcome: str | None = Query(default=None, pattern="^(success|partial|failed)$"),
     since_hours: float | None = Query(default=None, gt=0, le=24 * 365),
     include_eval: bool = True,
+    user_id: str | None = Query(default=None, max_length=64),
     _: CurrentUser = Depends(admin_user),
     svc: KnowledgeService = Depends(get_service),
 ) -> dict[str, Any]:
-    events = _filtered_events(svc, config_id, outcome, since_hours, include_eval)
+    events = _filtered_events(
+        svc, config_id, outcome, since_hours, include_eval, user_id=user_id
+    )
     result = compute_metrics(events, svc.settings.kis_grounding_threshold)
     if since_hours is None and svc.store.count_events() > LARGE_EVENT_COUNT:
         result["window_note"] = "More than 5,000 events: showing the last 7 days."
@@ -304,10 +385,13 @@ async def list_queries(
     since_hours: float | None = Query(default=None, gt=0, le=24 * 365),
     include_eval: bool = True,
     limit: int = Query(default=50, ge=1, le=500),
+    user_id: str | None = Query(default=None, max_length=64),
     _: CurrentUser = Depends(admin_user),
     svc: KnowledgeService = Depends(get_service),
 ) -> list[dict[str, Any]]:
-    events = _filtered_events(svc, config_id, outcome, since_hours, include_eval, limit)
+    events = _filtered_events(
+        svc, config_id, outcome, since_hours, include_eval, limit, user_id
+    )
     return [summarize_event(e) for e in events]
 
 

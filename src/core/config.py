@@ -103,6 +103,16 @@ class Settings(BaseSettings):
     kis_vision_enabled: bool = True
     kis_vision_max_pages: int = 30  # vision calls per document
     kis_table_chunk_max_chars: int = 4000
+    # Unusual-activity rules (admin Users / Observability pages)
+    kis_user_daily_token_cap: int = 200_000
+    kis_anomaly_burst_per_5min: int = 20
+    kis_anomaly_injection_per_24h: int = 2
+    kis_anomaly_pii_per_24h: int = 3
+    kis_anomaly_failed_logins_10min: int = 5
+    kis_anomaly_forbidden_per_24h: int = 3
+    kis_anomaly_token_spike_factor: float = 3.0
+    kis_off_hours_start: int = 0  # local hour, inclusive
+    kis_off_hours_end: int = 5  # local hour, exclusive
     llm_price_input_per_1k: float = 0.00005
     llm_price_output_per_1k: float = 0.00008
     prompt_template_version: str = "kis-grounded-v2"  # v2 adds {{calc: ...}}

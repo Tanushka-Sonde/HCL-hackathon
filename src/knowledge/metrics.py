@@ -167,6 +167,8 @@ def summarize_event(e: dict[str, Any]) -> dict[str, Any]:
         "query_id": e["identity"]["query_id"],
         "timestamp": e["identity"]["timestamp"],
         "session_id": e["identity"]["session_id"],
+        "user_id": e["identity"].get("user_id"),
+        "username": e["identity"].get("username"),
         "config_id": e["identity"]["config_id"],
         "query": e["question"]["original"],
         "route": e["question"]["route"],
