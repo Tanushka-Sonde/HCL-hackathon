@@ -250,6 +250,49 @@ async def get_asset(
     return FileResponse(path, media_type="image/png")
 
 
+DEFAULT_IMAGE_QUESTION = (
+    "What does this image show, and what do the documents say about it?"
+)
+
+
+@router.post("/query/multimodal", response_model=QueryResponse)
+async def query_multimodal(
+    request: Request,
+    image: UploadFile,
+    query: str = Form(default="", max_length=2000),
+    session_id: str | None = Form(default=None, max_length=64),
+    config_id: str = Form(default="B", pattern="^[AB]$"),
+    top_k: int = Form(default=5, ge=1, le=10),
+    max_input_tokens: int = Form(default=3000, ge=256, le=32_000),
+    max_output_tokens: int = Form(default=500, ge=32, le=4096),
+    user: CurrentUser = Depends(current_user),
+    svc: KnowledgeService = Depends(get_service),
+) -> QueryResponse:
+    """Ask about an attached image (png/jpg/webp, max 10 MB)."""
+    limit = svc.settings.kis_query_image_max_mb * 1_048_576
+    if image.size is not None and image.size > limit:
+        raise ValidationError(file_too_large_message(image.size, limit))
+    content = await image.read(limit + 1)
+    question = query.strip() or DEFAULT_IMAGE_QUESTION
+    described = await svc.describe_query_image(
+        content, image.filename or "image.png", question
+    )
+    body = QueryRequest(
+        query=question,
+        session_id=session_id,
+        config_id=config_id,  # type: ignore[arg-type]
+        top_k=top_k,
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+    )
+    return await svc.query(
+        body,
+        correlation_id=getattr(request.state, "request_id", None),
+        user=user,
+        image=described,
+    )
+
+
 @router.post("/feedback")
 async def feedback(
     body: FeedbackRequest,

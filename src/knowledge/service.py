@@ -14,11 +14,12 @@ import threading
 import time
 import uuid
 from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from src.core.exceptions import AuthorizationError
+from src.core.exceptions import AuthorizationError, ValidationError
 from src.core.logging import get_logger
 from src.ingestion.pipeline import RecursiveTextChunker
 from src.knowledge.anomaly import detect_anomalies
@@ -38,6 +39,7 @@ from src.knowledge.parsing import (
     ALLOWED_EXTENSIONS,
     Asset,
     TextUnit,
+    file_too_large_message,
     parse_document,
     split_table,
 )
@@ -65,7 +67,7 @@ from src.knowledge.validation import (
     is_insufficient,
     validate_citations,
 )
-from src.knowledge.vision import VisionClient
+from src.knowledge.vision import VisionClient, load_prompt
 from src.knowledge.visuals import build_visuals, extract_chart_block
 
 if TYPE_CHECKING:
@@ -88,6 +90,19 @@ def _sanitize_error(exc: BaseException) -> str:
     """Exception category + truncated message, without paths or secrets."""
     msg = str(exc).replace(str(PROJECT_ROOT), "<app>")
     return f"{type(exc).__name__}: {msg[:200]}"
+
+
+@dataclass
+class ImageInput:
+    """An image attached to a question, already described by the vision model."""
+
+    description: str
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    latency_ms: float = 0.0
+    size_bytes: int = 0
+    stored_path: str | None = None
 
 
 class KnowledgeService:
@@ -255,6 +270,53 @@ class KnowledgeService:
             warnings=parsed.warnings,
         )
 
+    async def describe_query_image(
+        self, image_bytes: bytes, filename: str, question: str
+    ) -> ImageInput:
+        """Validate an attached image and describe it with the vision model."""
+        limit = self.settings.kis_query_image_max_mb * 1_048_576
+        if len(image_bytes) > limit:
+            raise ValidationError(file_too_large_message(len(image_bytes), limit))
+        ext = Path(filename).suffix.lower()
+        signatures = {
+            ".png": (b"\x89PNG\r\n\x1a\n",),
+            ".jpg": (b"\xff\xd8\xff",),
+            ".jpeg": (b"\xff\xd8\xff",),
+            ".webp": (b"RIFF",),
+        }
+        if ext not in signatures:
+            raise ValidationError("Attach a .png, .jpg or .webp image.")
+        if not image_bytes.startswith(signatures[ext]):
+            raise ValidationError(
+                f"File has a {ext} extension but is not a valid image."
+            )
+        if not self.vision.enabled:
+            raise ValidationError(
+                f"Image questions need vision, and {VisionClient.UNAVAILABLE}."
+            )
+        prompt = load_prompt("query_image_v1").replace("{question}", question[:500])
+        result = await self.vision.adescribe(image_bytes, prompt)
+        if not result.ok or not result.text.strip():
+            raise ValidationError(
+                f"Could not read the image: {result.error or 'no description'}"
+            )
+        stored = None
+        if self.settings.kis_store_query_images:
+            folder = self.data_dir / "query_images"
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{uuid.uuid4()}{ext}"
+            path.write_bytes(image_bytes)
+            stored = path.relative_to(self.data_dir).as_posix()
+        return ImageInput(
+            description=result.text.strip(),
+            model=result.model,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            latency_ms=result.latency_ms,
+            size_bytes=len(image_bytes),
+            stored_path=stored,
+        )
+
     def _unit_pieces(self, unit: TextUnit) -> list[str]:
         """Text is chunked; a table is one chunk (split by rows, header kept)."""
         if unit.content_type == "table":
@@ -343,6 +405,7 @@ class KnowledgeService:
         correlation_id: str | None = None,
         eval_meta: dict[str, Any] | None = None,
         user: CurrentUser | None = None,
+        image: ImageInput | None = None,
     ) -> QueryResponse:
         settings = self.settings
         t_start = time.perf_counter()
@@ -363,6 +426,7 @@ class KnowledgeService:
         stage_errors: dict[str, str] = {}
         errors: list[dict[str, Any]] = []
         perf: dict[str, float] = {
+            "vision_ms": image.latency_ms if image else 0.0,
             "context_ms": 0.0,
             "retrieval_ms": 0.0,
             "tool_ms": 0.0,
@@ -403,13 +467,22 @@ class KnowledgeService:
             rewrite_tokens = (t_in, t_out)
             if text:
                 normalized, resolution.method = text, "llm"
+        # An attached image: its sanitized description joins the question for
+        # routing and retrieval, and is citable as [U1].
+        image_text: str | None = None
+        image_injections: list[str] = []
+        if image is not None:
+            clean = sanitize_evidence(image.description)
+            image_text = clean.text[:1500]
+            image_injections = clean.removed
+            normalized = f"{normalized}\n[Image content]: {image_text}"
         perf["context_ms"] = _ms(t)
         stages["context"] = "ok"
 
         # Step 5 — routing on the user's own words. A follow-up with no
         # signals of its own ("and the international one?") uses the rewrite.
         router_notes: list[str] = []
-        decision = route_query(req.query)
+        decision = route_query(req.query + (f"\n{image_text}" if image_text else ""))
         if selected_turns and not (decision.data_signals or decision.doc_signals):
             decision = route_query(normalized)
             router_notes.append("follow-up without own signals; routed on rewrite")
@@ -515,6 +588,10 @@ class KnowledgeService:
                     "input_tokens": rewrite_tokens[0],
                     "output_tokens": rewrite_tokens[1],
                 },
+                "vision_query": {
+                    "input_tokens": image.input_tokens if image else 0,
+                    "output_tokens": image.output_tokens if image else 0,
+                },
             },
         }
         calculations: list[dict[str, Any]] = []
@@ -539,7 +616,7 @@ class KnowledgeService:
                 "figures can be given. The failure has been logged for follow-up."
             )
             stages["generation"] = "skipped"
-        elif not evidence_found and not tool_ok:
+        elif not evidence_found and not tool_ok and not image_text:
             answer = INSUFFICIENT_ANSWER
             stages["generation"] = "skipped"
         else:
@@ -565,6 +642,7 @@ class KnowledgeService:
                     conflicts,
                     settings,
                     max_output_tokens=max_out,
+                    user_image=image_text,
                 )
                 output_truncated = gen.finish_reason == "length"
                 answer, calculations = apply_calcs(gen.text or INSUFFICIENT_ANSWER)
@@ -592,10 +670,15 @@ class KnowledgeService:
         t_v = time.perf_counter()
         # Citations and grounding are checked on the raw answer; role-based
         # masking is applied afterwards, only to what the user is shown.
-        citations = validate_citations(answer, evidence, tool_calls)
+        citations = validate_citations(answer, evidence, tool_calls, image_text)
         if stages.get("generation") in ("ok", "fallback"):
             grounding = assess_grounding(
-                answer, evidence, tool_calls, calculations, question=req.query
+                answer,
+                evidence,
+                tool_calls,
+                calculations,
+                question=req.query,
+                user_image=image_text,
             )
         else:
             # Blocked / fallback / error messages make no factual claims.
@@ -634,7 +717,7 @@ class KnowledgeService:
             stage_errors=stage_errors,
             injection_blocked=injection_blocked,
             needs_tool=decision.needs_tool,
-            evidence_found=evidence_found,
+            evidence_found=evidence_found or bool(image_text),
             tool_calls=tool_calls,
             llm_status=llm_status,
             answer_insufficient=insufficient and not injection_blocked,
@@ -646,7 +729,7 @@ class KnowledgeService:
         flags: list[str] = []
         if conflicts:
             flags.append("CONFLICT_SURFACED")
-        if chunk_injections:
+        if chunk_injections or image_injections:
             flags.append("EMBEDDED_INJECTION_REMOVED")
         if view["masked"]:
             flags.append("PII_MASKED")
@@ -781,6 +864,17 @@ class KnowledgeService:
             "errors": errors,
             "eval": eval_meta,
             "masking": {"applied": not user.is_admin, "counts": view["masked"]},
+            "image_input": None
+            if image is None
+            else {
+                "description": image.description,
+                "used_text": image_text,
+                "removed_instructions": image_injections,
+                "model": image.model,
+                "latency_ms": image.latency_ms,
+                "size_bytes": image.size_bytes,
+                "stored_path": image.stored_path,
+            },
         }
         try:
             self.store.insert_event(event)

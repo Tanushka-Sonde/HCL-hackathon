@@ -105,6 +105,8 @@ class Settings(BaseSettings):
     kis_table_chunk_max_chars: int = 4000
     kis_max_input_tokens_cap: int = 8000
     kis_max_output_tokens_cap: int = 1500
+    kis_query_image_max_mb: int = 10
+    kis_store_query_images: bool = False  # keep raw images attached to questions
     # Unusual-activity rules (admin Users / Observability pages)
     kis_user_daily_token_cap: int = 200_000
     kis_anomaly_burst_per_5min: int = 20

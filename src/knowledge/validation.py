@@ -16,11 +16,15 @@ from src.knowledge.generation import INSUFFICIENT_ANSWER
 from src.knowledge.schemas import Citation, Evidence, ToolCall
 from src.knowledge.text import content_tokens, numbers_in, split_sentences
 
-CITATION_RE = re.compile(r"\[((?:S|T)\d+)\]")
+# S = document evidence, T = tool result, U = the image attached to the question
+CITATION_RE = re.compile(r"\[((?:S|T|U)\d+)\]")
+USER_IMAGE_ID = "U1"
 _TOKEN_SUPPORT = 0.5
 
 
-def _source_texts(evidence: list[Evidence], tools: list[ToolCall]) -> dict[str, str]:
+def _source_texts(
+    evidence: list[Evidence], tools: list[ToolCall], user_image: str | None = None
+) -> dict[str, str]:
     texts = {
         ev.source_id: f"{ev.title} {ev.doc_id} version {ev.version} {ev.status} {ev.section or ''} {ev.content}"
         for ev in evidence
@@ -30,11 +34,16 @@ def _source_texts(evidence: list[Evidence], tools: list[ToolCall]) -> dict[str, 
             texts[tc.source_id] = (
                 json.dumps(tc.rows, default=str) + " " + json.dumps(tc.params)
             )
+    if user_image:
+        texts[USER_IMAGE_ID] = user_image
     return texts
 
 
 def validate_citations(
-    answer: str, evidence: list[Evidence], tools: list[ToolCall]
+    answer: str,
+    evidence: list[Evidence],
+    tools: list[ToolCall],
+    user_image: str | None = None,
 ) -> list[Citation]:
     """Every distinct citation tag, and whether it maps to returned evidence."""
     by_id = {ev.source_id: ev for ev in evidence}
@@ -59,6 +68,12 @@ def validate_citations(
                     source_id=sid,
                     valid=True,
                     target=f"{tc.name}:{tc.template} {tc.params}",
+                )
+            )
+        elif sid == USER_IMAGE_ID and user_image:
+            citations.append(
+                Citation(
+                    source_id=sid, valid=True, target="image attached to the question"
                 )
             )
         else:
@@ -104,6 +119,7 @@ def assess_grounding(
     tools: list[ToolCall],
     calculations: list[dict[str, Any]] | None = None,
     question: str | None = None,
+    user_image: str | None = None,
 ) -> dict[str, Any]:
     """Classify each answer sentence as supported or potentially unsupported.
 
@@ -112,7 +128,7 @@ def assess_grounding(
     Numbers the user gave in the question ("the last 5 months") are not claims.
     A paragraph's trailing citation also covers the sentences before it.
     """
-    texts = _source_texts(evidence, tools)
+    texts = _source_texts(evidence, tools, user_image)
     calcs = _calc_results(calculations)
     given = numbers_in(question or "")
     supported: list[str] = []
