@@ -1,0 +1,40 @@
+{
+  "title": "AI Research API",
+  "uid": "ai-api",
+  "panels": [
+    {
+      "title": "Active HTTP Requests",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "targets": [{ "expr": "active_requests" }]
+    },
+    {
+      "title": "HTTP Request Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 0 },
+      "targets": [{ "expr": "rate(http_requests_total[1m])" }]
+    },
+    {
+      "title": "LLM Requests",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [{ "expr": "sum by (provider, operation) (rate(llm_requests_total[1m]))" }]
+    },
+    {
+      "title": "LLM Circuit Breaker State (0=C, 1=H, 2=O)",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [{ "expr": "llm_circuit_breaker_state" }]
+    },
+    {
+      "title": "DB Pool Usage",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "db_pool_size", "legendFormat": "Pool Size" },
+        { "expr": "db_pool_checkedout", "legendFormat": "Checked Out" }
+      ]
+    }
+  ],
+  "schemaVersion": 38
+}
