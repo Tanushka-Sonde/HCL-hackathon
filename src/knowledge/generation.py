@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _CONTINUATION_RE = re.compile(r"^(It|This|They|These|Those|The access)\b")
+SECOND_SENTENCE_RATIO = 0.75
 # Identifiers such as ACR-3310, PRJ-1002, HR-POL-007.
 _ID_RE = re.compile(r"\b[A-Za-z]{2,6}(?:-[A-Za-z0-9]+)*-[A-Za-z]*\d[A-Za-z0-9]*\b")
 
@@ -298,6 +299,14 @@ def generate_extractive(
             )
 
     relevant = [ev for ev in evidence if ev.relevance >= min_relevance]
+    # When some evidence names the asked ID, evidence that does not is noise
+    # (ACR-3310 must not pull in ACR-2219 from a similar document).
+    if asked_ids and any(
+        any(x in ev.content.upper() for x in asked_ids) for ev in relevant
+    ):
+        relevant = [
+            ev for ev in relevant if any(x in ev.content.upper() for x in asked_ids)
+        ]
     # Prefer effective documents; superseded ones are only shown when in conflict.
     relevant.sort(key=lambda ev: (ev.status == "superseded", -ev.relevance))
     used = 0
@@ -325,6 +334,9 @@ def generate_extractive(
         scored.sort(key=lambda x: -x[0])
         if not scored:
             continue
+        # A second sentence must be nearly as relevant as the best one, so a
+        # neighbouring record ("Asha Rao ...") is not added to "Tom Becker ...".
+        scored = [s for s in scored if s[0] >= SECOND_SENTENCE_RATIO * scored[0][0]]
         prefix = (
             f"Superseded version {ev.version}: " if ev.status == "superseded" else ""
         )

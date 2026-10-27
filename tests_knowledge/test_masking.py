@@ -56,3 +56,8 @@ def test_event_keeps_raw_answer_for_admin(
     assert "121,500" in event["generation"]["output"]
     assert event["masking"]["applied"] is True
     assert event["masking"]["counts"].get("salary")
+
+
+def test_answer_is_about_the_asked_person_only(client: TestClient) -> None:
+    body = _ask(client)
+    assert "Tom Becker" in body["answer"] and "Asha Rao" not in body["answer"]

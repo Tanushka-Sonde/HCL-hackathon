@@ -255,3 +255,4 @@ def test_extractive_answer_stays_on_the_asked_id(client: TestClient) -> None:
     body = _ask(client, "Who must approve ACR-3310?")
     assert "CISO" in body["answer"]
     assert "ACR-1004" not in body["answer"]
+    assert "ACR-2219" not in body["answer"]  # near-duplicate code, other document
