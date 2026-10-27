@@ -122,6 +122,8 @@ class KnowledgeIndex:
         min_relevance: float,
         category: str | None = None,
         status: str | None = None,
+        doc_id: str | None = None,
+        version: str | None = None,
         candidate_pool: int = 20,
     ) -> RetrievalResult:
         """Run configuration A or B and return scored candidates."""
@@ -131,6 +133,8 @@ class KnowledgeIndex:
             for i, c in enumerate(chunks)
             if (not category or (c.get("category") or "").lower() == category.lower())
             and (not status or (c.get("status") or "").lower() == status.lower())
+            and (not doc_id or (c.get("doc_id") or "").lower() == doc_id.lower())
+            and (not version or (c.get("version") or "") == version)
         ]
         if not allowed:
             return RetrievalResult()

@@ -22,7 +22,12 @@ from src.core.logging import get_logger
 from src.ingestion.pipeline import RecursiveTextChunker
 from src.knowledge.auth import SYSTEM_EVAL_USER, AuthService, CurrentUser
 from src.knowledge.calc import apply_calcs
-from src.knowledge.context import ConversationMemory, Turn, resolve
+from src.knowledge.context import (
+    ConversationMemory,
+    Turn,
+    resolve,
+    rewrite_with_llm,
+)
 from src.knowledge.embeddings import build_embedder, build_reranker
 from src.knowledge.generation import INSUFFICIENT_ANSWER, generate
 from src.knowledge.masking import detect_pii, mask_for_user, mask_rows, merge_counts
@@ -375,21 +380,38 @@ class KnowledgeService:
             )
             logger.exception("kis_stage_failed", stage=stage, query_id=query_id)
 
-        # Step 4 — query understanding & conversation context
-        t = time.perf_counter()
-        history = self.memory.history(memory_key)
-        normalized, selected_turns = resolve(req.query, history)
-        perf["context_ms"] = _ms(t)
-        stages["context"] = "ok"
-
         # Safety precheck on the user's own text
         query_injection = detect_injection(req.query)
         injection_blocked = bool(query_injection)
 
-        # Step 5 — routing
-        decision = route_query(normalized)
-        stages["routing"] = "ok"
+        # Step 4 — query understanding & conversation context
+        t = time.perf_counter()
+        history = self.memory.history(memory_key)
+        resolution = resolve(req.query, history)
+        normalized, selected_turns = resolution.normalized, resolution.selected_turns
+        rewrite_tokens = (0, 0)
+        if (
+            resolution.method == "rule"
+            and settings.groq_api_key
+            and not injection_blocked
+        ):
+            text, t_in, t_out = await rewrite_with_llm(
+                req.query, selected_turns[-1], settings
+            )
+            rewrite_tokens = (t_in, t_out)
+            if text:
+                normalized, resolution.method = text, "llm"
+        perf["context_ms"] = _ms(t)
+        stages["context"] = "ok"
+
+        # Step 5 — routing on the user's own words. A follow-up with no
+        # signals of its own ("and the international one?") uses the rewrite.
         router_notes: list[str] = []
+        decision = route_query(req.query)
+        if selected_turns and not (decision.data_signals or decision.doc_signals):
+            decision = route_query(normalized)
+            router_notes.append("follow-up without own signals; routed on rewrite")
+        stages["routing"] = "ok"
 
         candidates: list[Candidate] = []
         evidence: list[Evidence] = []
@@ -413,6 +435,8 @@ class KnowledgeService:
                     min_relevance=min_rel,
                     category=req.category,
                     status=req.status,
+                    doc_id=req.doc_id,
+                    version=req.version,
                 )
                 candidates = result.candidates
                 evidence_found = result.evidence_found
@@ -481,11 +505,15 @@ class KnowledgeService:
             "status": "skipped",
             "error": None,
         }
-        usage = {
-            "input_tokens": 0,
-            "output_tokens": 0,
+        # Token usage per stage; totals and cost are computed once at the end.
+        usage: dict[str, Any] = {
             "cached_tokens": None,
-            "estimated_cost_usd": 0.0,
+            "by_stage": {
+                "context_rewrite": {
+                    "input_tokens": rewrite_tokens[0],
+                    "output_tokens": rewrite_tokens[1],
+                },
+            },
         }
         calculations: list[dict[str, Any]] = []
         if injection_blocked:
@@ -522,16 +550,11 @@ class KnowledgeService:
                     status=gen.status,
                     error=gen.error,
                 )
-                usage.update(
-                    input_tokens=gen.input_tokens,
-                    output_tokens=gen.output_tokens,
-                    cached_tokens=gen.cached_tokens,
-                    estimated_cost_usd=round(
-                        gen.input_tokens / 1000 * settings.llm_price_input_per_1k
-                        + gen.output_tokens / 1000 * settings.llm_price_output_per_1k,
-                        8,
-                    ),
-                )
+                usage["cached_tokens"] = gen.cached_tokens
+                usage["by_stage"]["generation"] = {
+                    "input_tokens": gen.input_tokens,
+                    "output_tokens": gen.output_tokens,
+                }
                 stages["generation"] = gen.status
                 perf["llm_ms"] = gen.latency_ms or _ms(t_g)
             except Exception as exc:
@@ -614,6 +637,8 @@ class KnowledgeService:
             + sum(view["masked"].values()),
         }
 
+        _finalize_usage(usage, settings)
+
         # Steps 10-11 — presentation + observability event
         event = {
             "identity": {
@@ -638,6 +663,8 @@ class KnowledgeService:
                 "filters": {
                     "category": req.category,
                     "status": req.status,
+                    "doc_id": req.doc_id,
+                    "version": req.version,
                     "top_k": req.top_k,
                 },
             },
@@ -681,6 +708,11 @@ class KnowledgeService:
             },
             "context": {
                 "history_turns_available": len(history),
+                "rewrite": {
+                    "method": resolution.method,
+                    "carried_terms": resolution.carried_terms,
+                    "standalone": normalized if resolution.method != "none" else None,
+                },
                 "selected_turns": [
                     {"query_id": t.query_id, "query": t.query, "route": t.route}
                     for t in selected_turns
@@ -853,6 +885,18 @@ class KnowledgeService:
     ) -> bool:
         clean = comment.strip()[:1000] if comment else None
         return self.store.add_feedback(query_id, helpful, clean, _now(), user_id)
+
+
+def _finalize_usage(usage: dict[str, Any], settings: Settings) -> None:
+    """Totals across stages and the estimated cost from configured prices."""
+    stages = usage["by_stage"].values()
+    usage["input_tokens"] = sum(s.get("input_tokens", 0) for s in stages)
+    usage["output_tokens"] = sum(s.get("output_tokens", 0) for s in stages)
+    usage["estimated_cost_usd"] = round(
+        usage["input_tokens"] / 1000 * settings.llm_price_input_per_1k
+        + usage["output_tokens"] / 1000 * settings.llm_price_output_per_1k,
+        8,
+    )
 
 
 def _doc_fields(row: dict[str, Any]) -> dict[str, Any]:

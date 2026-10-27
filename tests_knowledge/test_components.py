@@ -158,12 +158,42 @@ def test_followup_rewrite() -> None:
         "USD 75",
         "docs",
     )
-    normalized, turns = resolve("And what about international trips?", [prior])
-    assert "diem" in normalized and turns == [prior]
-    standalone, none = resolve(
+    follow = resolve("And what about international trips?", [prior])
+    assert "diem" in follow.normalized and follow.selected_turns == [prior]
+    standalone = resolve(
         "Who approves ACR-3310 requests for production servers?", [prior]
     )
-    assert none == [] and "diem" not in standalone
+    assert standalone.selected_turns == [] and "diem" not in standalone.normalized
+
+
+@pytest.mark.parametrize(
+    ("question", "followup"),
+    [
+        ("Is there a parental leave policy?", False),  # the audit's leak case
+        ("What is the hotel limit for international travel?", False),
+        ("Who approves it?", True),
+        ("And for PRJ-1003?", True),
+        ("Those limits apply abroad too?", True),
+        ("International?", True),
+    ],
+)
+def test_followup_detection(question: str, followup: bool) -> None:
+    prior = Turn("q1", "What is the remaining budget of PRJ-1002?", "", "", "both")
+    assert bool(resolve(question, [prior]).selected_turns) is followup
+
+
+def test_context_carried_from_original_words_only() -> None:
+    first = Turn("q1", "What is the per diem for domestic travel?", "", "", "docs")
+    second = Turn(
+        "q2",
+        "And international?",
+        "And international? (context: per diem domestic travel)",
+        "",
+        "docs",
+    )
+    third = resolve("And for Japan?", [first, second])
+    # Carried from "And international?" only, not the earlier rewrite.
+    assert "diem" not in third.normalized and "international" in third.normalized
 
 
 def test_sql_tool_success_and_provenance(service: KnowledgeService) -> None:
@@ -413,3 +443,30 @@ def test_doc_id_from_filename(filename: str, doc_id: str) -> None:
     from src.knowledge.parsing import doc_id_from_filename
 
     assert doc_id_from_filename(filename) == doc_id
+
+
+def test_trailing_citation_covers_paragraph() -> None:
+    ev = _ev("S1", "Records are kept for 7 years. Backups are encrypted.")
+    result = assess_grounding(
+        "Records are kept for 7 years. Backups are encrypted [S1].\nUnrelated claim.",
+        [ev],
+        [],
+    )
+    assert len(result["supported"]) == 2
+    # The tag does not reach across a paragraph break.
+    assert result["unsupported"][0]["claim"] == "Unrelated claim."
+
+
+def test_filters_by_doc_id_and_version(service: KnowledgeService) -> None:
+    result = service.index.search(
+        "retention period",
+        config_id="B",
+        reranker=service.reranker,
+        top_k=5,
+        min_relevance=0.0,
+        doc_id="HR-POL-007",
+        version="1.0",
+    )
+    assert result.selected
+    assert {c.chunk["version"] for c in result.selected} == {"1.0"}
+    assert {c.chunk["doc_id"] for c in result.selected} == {"HR-POL-007"}

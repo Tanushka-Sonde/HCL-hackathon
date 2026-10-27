@@ -23,6 +23,8 @@ class QueryRequest(BaseModel):
     top_k: int = Field(default=5, ge=1, le=10)
     category: str | None = Field(default=None, max_length=50)
     status: str | None = Field(default=None, max_length=20)
+    doc_id: str | None = Field(default=None, max_length=60)
+    version: str | None = Field(default=None, max_length=20)
 
 
 class LoginRequest(BaseModel):

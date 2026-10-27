@@ -66,6 +66,23 @@ def validate_citations(
     return citations
 
 
+def _sentences_with_tags(answer: str) -> list[tuple[str, list[str]]]:
+    """Each sentence with the citation tags that cover it.
+
+    A sentence without its own tag is covered by the next tag in the same
+    paragraph ("Fact one. Fact two [S1]." -> both cite S1). A tag never
+    reaches back across a paragraph break.
+    """
+    out: list[tuple[str, list[str]]] = []
+    for paragraph in answer.split("\n"):
+        sentences = split_sentences(paragraph)
+        tags = [CITATION_RE.findall(s) for s in sentences]
+        for i, sentence in enumerate(sentences):
+            covering = tags[i] or next((t for t in tags[i + 1 :] if t), [])
+            out.append((sentence, covering))
+    return out
+
+
 def is_insufficient(answer: str) -> bool:
     return INSUFFICIENT_ANSWER.lower().rstrip(".") in answer.lower()
 
@@ -93,20 +110,21 @@ def assess_grounding(
     A computed number (from a ``{{calc: ...}}`` expression) counts as present
     in the source when every operand of its expression is in the cited source.
     Numbers the user gave in the question ("the last 5 months") are not claims.
+    A paragraph's trailing citation also covers the sentences before it.
     """
     texts = _source_texts(evidence, tools)
     calcs = _calc_results(calculations)
     given = numbers_in(question or "")
     supported: list[str] = []
     unsupported: list[dict[str, str]] = []
-    for sentence in split_sentences(answer):
+    for sentence, tags in _sentences_with_tags(answer):
         if sentence.startswith("Note:") or is_insufficient(sentence):
             continue
         bare = CITATION_RE.sub("", sentence)
         tokens = set(content_tokens(bare))
         if not tokens:
             continue
-        cited = [sid for sid in CITATION_RE.findall(sentence) if sid in texts]
+        cited = [sid for sid in tags if sid in texts]
         if not cited:
             unsupported.append({"claim": sentence, "reason": "no valid citation"})
             continue

@@ -64,6 +64,8 @@ router = APIRouter(prefix="/kis", tags=["knowledge"])
 _service: KnowledgeService | None = None
 _service_lock = threading.Lock()
 _eval_state: dict[str, Any] = {"status": "idle"}
+LARGE_EVENT_COUNT = 5000
+DEFAULT_WINDOW_HOURS = 24 * 7
 
 
 def get_service() -> KnowledgeService:
@@ -263,6 +265,9 @@ def _filtered_events(
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     since = None
+    if since_hours is None and svc.store.count_events() > LARGE_EVENT_COUNT:
+        # Every KPI re-reads the stored events; keep large stores responsive.
+        since_hours = DEFAULT_WINDOW_HOURS
     if since_hours:
         since = (datetime.now(UTC) - timedelta(hours=since_hours)).isoformat(
             timespec="milliseconds"
@@ -286,7 +291,10 @@ async def metrics(
     svc: KnowledgeService = Depends(get_service),
 ) -> dict[str, Any]:
     events = _filtered_events(svc, config_id, outcome, since_hours, include_eval)
-    return compute_metrics(events, svc.settings.kis_grounding_threshold)
+    result = compute_metrics(events, svc.settings.kis_grounding_threshold)
+    if since_hours is None and svc.store.count_events() > LARGE_EVENT_COUNT:
+        result["window_note"] = "More than 5,000 events: showing the last 7 days."
+    return result
 
 
 @router.get("/queries")

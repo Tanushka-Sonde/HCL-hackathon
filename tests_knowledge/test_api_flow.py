@@ -227,3 +227,31 @@ def test_upload_with_metadata_fields_and_chunk_viewer(client: TestClient) -> Non
     assert doc["uploaded_by"]
     chunks = client.get(f"/api/v1/kis/documents/{doc['id']}/chunks").json()
     assert chunks[0]["content_type"] == "text" and chunks[0]["source_method"] == "plain"
+
+
+def test_no_context_leak_after_budget_question(client: TestClient) -> None:
+    """Regression (audit): a new question must not inherit PRJ-1002 context."""
+    _ask(
+        client,
+        "What is the remaining budget of PRJ-1002 and does a USD 20,000 purchase "
+        "on it need CFO approval?",
+        session_id="s-leak",
+    )
+    leave = _ask(client, "Is there a parental leave policy?", session_id="s-leak")
+    assert leave["route"] == "docs" and not leave["tool_calls"]
+    assert leave["reason_codes"] == ["INSUFFICIENT_EVIDENCE"]
+    assert "PRJ-1002" not in leave["answer"]
+    leave_event = client.get(f"/api/v1/kis/queries/{leave['query_id']}").json()
+    assert leave_event["context"]["selected_turns"] == []
+    hotel = _ask(
+        client, "What is the hotel limit for international travel?", session_id="s-leak"
+    )
+    event = client.get(f"/api/v1/kis/queries/{hotel['query_id']}").json()
+    assert event["context"]["selected_turns"] == []
+    assert "prj" not in event["question"]["normalized"].lower()
+
+
+def test_extractive_answer_stays_on_the_asked_id(client: TestClient) -> None:
+    body = _ask(client, "Who must approve ACR-3310?")
+    assert "CISO" in body["answer"]
+    assert "ACR-1004" not in body["answer"]

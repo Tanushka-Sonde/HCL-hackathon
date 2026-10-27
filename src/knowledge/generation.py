@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _CONTINUATION_RE = re.compile(r"^(It|This|They|These|Those|The access)\b")
+# Identifiers such as ACR-3310, PRJ-1002, HR-POL-007.
+_ID_RE = re.compile(r"\b[A-Za-z]{2,6}(?:-[A-Za-z0-9]+)*-[A-Za-z]*\d[A-Za-z0-9]*\b")
 
 INSUFFICIENT_ANSWER = (
     "I couldn't find enough evidence in the indexed documents to answer that."
@@ -38,6 +40,23 @@ SYSTEM_PROMPT = """You are an enterprise knowledge assistant. Follow these rules
 5. If sources disagree (for example two versions of one policy), say so, name both versions, and prefer the one with status "effective".
 6. Be concise: at most 5 sentences. Do not invent numbers, names or dates.
 7. If you compute a number (sum, average, difference, growth), write the expression as {{calc: 120+135+150}} using the exact figures from the sources, and do not write the result yourself. Cite the source of the figures."""
+
+
+_CLIENTS: dict[tuple[str, int], Any] = {}
+
+
+def get_async_client(settings: Settings) -> Any:
+    """One AsyncGroq client per process (per key), reused across queries."""
+    key = (settings.groq_api_key, settings.llm_timeout_seconds)
+    if key not in _CLIENTS:
+        from groq import AsyncGroq
+
+        _CLIENTS[key] = AsyncGroq(
+            api_key=settings.groq_api_key,
+            timeout=settings.llm_timeout_seconds,
+            max_retries=1,
+        )
+    return _CLIENTS[key]
 
 
 @dataclass
@@ -115,14 +134,7 @@ async def _generate_groq(
     settings: Settings,
     start: float,
 ) -> GenerationResult:
-    from groq import AsyncGroq
-
-    client = AsyncGroq(
-        api_key=settings.groq_api_key,
-        timeout=settings.llm_timeout_seconds,
-        max_retries=1,
-    )
-    completion = await client.chat.completions.create(
+    completion = await get_async_client(settings).chat.completions.create(
         model=settings.groq_model_name,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -187,6 +199,9 @@ def generate_extractive(
     """
     own, _, carried = query.partition("(context:")
     own_tokens = set(content_tokens(own))
+    # When the question names an ID, answer only from sentences about that ID
+    # (otherwise "Who approves ACR-3310?" also returns ACR-1004's approver).
+    asked_ids = {i.upper() for i in _ID_RE.findall(own)}
     ctx_tokens = set(content_tokens(carried)) - own_tokens
     lines: list[str] = []
     if conflicts:
@@ -212,7 +227,14 @@ def generate_extractive(
             s for s in split_sentences(ev.content) if not s.startswith("[Removed:")
         ]
         scored = []
+        id_hits = {
+            i
+            for i, s in enumerate(sentences)
+            if asked_ids and any(x in s.upper() for x in asked_ids)
+        }
         for i, sentence in enumerate(sentences):
+            if id_hits and i not in id_hits:
+                continue
             s_tokens = set(content_tokens(sentence))
             overlap = 2 * len(own_tokens & s_tokens) + len(ctx_tokens & s_tokens)
             if overlap:

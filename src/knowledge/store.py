@@ -293,6 +293,10 @@ class KnowledgeStore:
             )
             self._conn.commit()
 
+    def count_events(self) -> int:
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM query_events").fetchone()[0]
+
     def update_event_payload(self, query_id: str, event: dict[str, Any]) -> None:
         """Replace an event's payload (used to attach evaluation results)."""
         payload = {k: v for k, v in event.items() if k != "feedback"}
