@@ -21,7 +21,8 @@ SUCCESS
 
 Flags do not change the outcome: CONFLICT_SURFACED, EMBEDDED_INJECTION_REMOVED,
 PII_MASKED (personal data or salaries masked for a user-role response),
-EVIDENCE_TRIMMED_FOR_BUDGET (evidence dropped or cut to fit the input budget).
+EVIDENCE_TRIMMED_FOR_BUDGET (evidence dropped or cut to fit the input budget),
+CHART_REJECTED (a chart had values not found in the cited sources; dropped).
 """
 
 from __future__ import annotations

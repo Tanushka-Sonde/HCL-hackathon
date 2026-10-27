@@ -66,6 +66,7 @@ from src.knowledge.validation import (
     validate_citations,
 )
 from src.knowledge.vision import VisionClient
+from src.knowledge.visuals import build_visuals, extract_chart_block
 
 if TYPE_CHECKING:
     from src.core.config import Settings
@@ -517,6 +518,7 @@ class KnowledgeService:
             },
         }
         calculations: list[dict[str, Any]] = []
+        model_chart: dict[str, Any] | None = None
         # Token budgets: the request's limits, never above the server caps.
         max_in = min(req.max_input_tokens, settings.kis_max_input_tokens_cap)
         max_out = min(req.max_output_tokens, settings.kis_max_output_tokens_cap)
@@ -566,6 +568,7 @@ class KnowledgeService:
                 )
                 output_truncated = gen.finish_reason == "length"
                 answer, calculations = apply_calcs(gen.text or INSUFFICIENT_ANSWER)
+                answer, model_chart = extract_chart_block(answer)
                 llm_status = gen.status
                 generation.update(
                     provider=gen.mode,
@@ -604,12 +607,26 @@ class KnowledgeService:
                 "rule": "not applicable: no generated answer",
             }
         insufficient = is_insufficient(answer)
+        visuals, chart_rejection = (
+            build_visuals(
+                question=req.query,
+                model_spec=model_chart,
+                evidence=evidence,
+                tools=tool_calls,
+                citations=citations,
+                calculations=calculations,
+            )
+            if stages.get("generation") in ("ok", "fallback") and not insufficient
+            else ([], None)
+        )
+        if chart_rejection:
+            logger.info("kis_chart_rejected", query_id=query_id, **chart_rejection)
         pii_detected = {
             "question": detect_pii(req.query),
             "evidence": merge_counts(*(detect_pii(ev.content) for ev in evidence)),
             "answer": detect_pii(answer),
         }
-        view = self._present(answer, evidence, tool_calls, conflicts, user)
+        view = self._present(answer, evidence, tool_calls, conflicts, user, visuals)
         perf["validation_ms"] = _ms(t_v)
         stages["validation"] = "ok"
 
@@ -633,6 +650,8 @@ class KnowledgeService:
             flags.append("EMBEDDED_INJECTION_REMOVED")
         if view["masked"]:
             flags.append("PII_MASKED")
+        if chart_rejection:
+            flags.append("CHART_REJECTED")
         if (
             budget_info["truncated_source"]
             or budget_info["evidence_dropped_for_budget"]["count"]
@@ -753,6 +772,8 @@ class KnowledgeService:
             "citations": [c.model_dump() for c in citations],
             "conflicts": conflicts,
             "calculations": calculations,
+            "visuals": visuals,
+            "chart_rejection": chart_rejection,
             "grounding": grounding,
             "safety": safety,
             "performance": {**perf, "total_ms": total_ms},
@@ -790,6 +811,7 @@ class KnowledgeService:
             safety=view["safety"](safety),
             grounding_score=grounding["score"],
             calculations=calculations,
+            visuals=view["visuals"],
             usage={
                 "input_tokens": usage["input_tokens"],
                 "output_tokens": usage["output_tokens"],
@@ -807,8 +829,10 @@ class KnowledgeService:
         tool_calls: list[ToolCall],
         conflicts: list[str],
         user: CurrentUser,
+        visuals: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """What this role may see. Admins: raw. Users: PII and salaries masked."""
+        visuals = visuals or []
         public_tools = [
             tc.model_copy(update={"error_detail": None}) for tc in tool_calls
         ]
@@ -820,6 +844,7 @@ class KnowledgeService:
                 "conflicts": conflicts,
                 "masked": {},
                 "safety": lambda s: s,
+                "visuals": visuals,
             }
         counts: list[dict[str, int]] = []
 
@@ -853,7 +878,18 @@ class KnowledgeService:
             hidden = {"pii_detected": None, "chunk_injections": injections}
             return {**safety, **hidden}
 
+        # A generated chart drawn from a source that holds personal data or
+        # salaries could reveal masked values, so users do not get it.
+        sensitive = {ev.source_id for ev in evidence if detect_pii(ev.content)} | {
+            tc.source_id for tc in tool_calls if mask_rows(tc.rows)[1]
+        }
+        safe_visuals = [
+            v
+            for v in visuals
+            if v["kind"] != "generated_chart" or not set(v["source_ids"]) & sensitive
+        ]
         return {
+            "visuals": safe_visuals,
             "answer": masked_answer,
             "evidence": masked_evidence,
             "tool_calls": masked_tools,

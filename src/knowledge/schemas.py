@@ -136,6 +136,7 @@ class QueryResponse(BaseModel):
     safety: dict[str, Any]
     grounding_score: float | None
     calculations: list[dict[str, Any]] = Field(default_factory=list)
+    visuals: list[dict[str, Any]] = Field(default_factory=list)
     usage: dict[str, Any] = Field(default_factory=dict)
     latency_ms: float
     llm_mode: Literal["groq", "extractive"]

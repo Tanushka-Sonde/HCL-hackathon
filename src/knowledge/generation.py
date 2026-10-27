@@ -40,7 +40,8 @@ SYSTEM_PROMPT = """You are an enterprise knowledge assistant. Follow these rules
 4. If the evidence does not answer the question, reply exactly: "I couldn't find enough evidence in the indexed documents to answer that."
 5. If sources disagree (for example two versions of one policy), say so, name both versions, and prefer the one with status "effective".
 6. Be concise: at most 5 sentences. Do not invent numbers, names or dates.
-7. If you compute a number (sum, average, difference, growth), write the expression as {{calc: 120+135+150}} using the exact figures from the sources, and do not write the result yourself. Cite the source of the figures."""
+7. If you compute a number (sum, average, difference, growth), write the expression as {{calc: 120+135+150}} using the exact figures from the sources, and do not write the result yourself. Cite the source of the figures.
+8. If the user asks to plot, chart, compare or show a trend, you may add ONE fenced block ```chart {"chart_type": "line|bar", "title": "...", "x_label": "...", "y_label": "...", "labels": [...], "series": [{"name": "...", "values": [...]}], "source_ids": ["S1"]}``` after the text. Use only numbers copied from the cited sources."""
 
 
 _CLIENTS: dict[tuple[str, int], Any] = {}
