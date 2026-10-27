@@ -21,6 +21,7 @@ from src.core.exceptions import AuthorizationError
 from src.core.logging import get_logger
 from src.ingestion.pipeline import RecursiveTextChunker
 from src.knowledge.auth import SYSTEM_EVAL_USER, AuthService, CurrentUser
+from src.knowledge.calc import apply_calcs
 from src.knowledge.context import ConversationMemory, Turn, resolve
 from src.knowledge.embeddings import build_embedder, build_reranker
 from src.knowledge.generation import INSUFFICIENT_ANSWER, generate
@@ -486,6 +487,7 @@ class KnowledgeService:
             "cached_tokens": None,
             "estimated_cost_usd": 0.0,
         }
+        calculations: list[dict[str, Any]] = []
         if injection_blocked:
             answer = BLOCKED_QUERY_ANSWER
         elif stage_errors:
@@ -512,7 +514,7 @@ class KnowledgeService:
                     conflicts,
                     settings,
                 )
-                answer = gen.text or INSUFFICIENT_ANSWER
+                answer, calculations = apply_calcs(gen.text or INSUFFICIENT_ANSWER)
                 llm_status = gen.status
                 generation.update(
                     provider=gen.mode,
@@ -543,7 +545,9 @@ class KnowledgeService:
         # masking is applied afterwards, only to what the user is shown.
         citations = validate_citations(answer, evidence, tool_calls)
         if stages.get("generation") in ("ok", "fallback"):
-            grounding = assess_grounding(answer, evidence, tool_calls)
+            grounding = assess_grounding(
+                answer, evidence, tool_calls, calculations, question=req.query
+            )
         else:
             # Blocked / fallback / error messages make no factual claims.
             grounding = {
@@ -686,6 +690,7 @@ class KnowledgeService:
             "generation": {**generation, "output": answer},
             "citations": [c.model_dump() for c in citations],
             "conflicts": conflicts,
+            "calculations": calculations,
             "grounding": grounding,
             "safety": safety,
             "performance": {**perf, "total_ms": total_ms},
@@ -722,6 +727,7 @@ class KnowledgeService:
             conflicts=view["conflicts"],
             safety=view["safety"](safety),
             grounding_score=grounding["score"],
+            calculations=calculations,
             latency_ms=total_ms,
             llm_mode="groq" if generation["provider"] == "groq" else "extractive",
         )

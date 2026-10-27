@@ -130,6 +130,7 @@ class QueryResponse(BaseModel):
     conflicts: list[str]
     safety: dict[str, Any]
     grounding_score: float | None
+    calculations: list[dict[str, Any]] = Field(default_factory=list)
     latency_ms: float
     llm_mode: Literal["groq", "extractive"]
 

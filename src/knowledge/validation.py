@@ -70,11 +70,33 @@ def is_insufficient(answer: str) -> bool:
     return INSUFFICIENT_ANSWER.lower().rstrip(".") in answer.lower()
 
 
+def _calc_results(
+    calculations: list[dict[str, Any]] | None,
+) -> list[tuple[str, set[str]]]:
+    """(result, operands) for each successful calculation, numbers normalized."""
+    out = []
+    for calc in calculations or []:
+        if calc.get("result") is not None:
+            out.append((calc["result"].replace(",", ""), numbers_in(calc["expr"])))
+    return out
+
+
 def assess_grounding(
-    answer: str, evidence: list[Evidence], tools: list[ToolCall]
+    answer: str,
+    evidence: list[Evidence],
+    tools: list[ToolCall],
+    calculations: list[dict[str, Any]] | None = None,
+    question: str | None = None,
 ) -> dict[str, Any]:
-    """Classify each answer sentence as supported or potentially unsupported."""
+    """Classify each answer sentence as supported or potentially unsupported.
+
+    A computed number (from a ``{{calc: ...}}`` expression) counts as present
+    in the source when every operand of its expression is in the cited source.
+    Numbers the user gave in the question ("the last 5 months") are not claims.
+    """
     texts = _source_texts(evidence, tools)
+    calcs = _calc_results(calculations)
+    given = numbers_in(question or "")
     supported: list[str] = []
     unsupported: list[dict[str, str]] = []
     for sentence in split_sentences(answer):
@@ -91,7 +113,9 @@ def assess_grounding(
         source = " ".join(texts[sid] for sid in cited)
         source_tokens = set(content_tokens(source))
         overlap = len(tokens & source_tokens) / len(tokens)
-        missing_numbers = numbers_in(bare) - numbers_in(source)
+        source_numbers = numbers_in(source)
+        derived = {result for result, operands in calcs if operands <= source_numbers}
+        missing_numbers = numbers_in(bare) - source_numbers - derived - given
         if overlap < _TOKEN_SUPPORT:
             unsupported.append(
                 {
@@ -114,7 +138,11 @@ def assess_grounding(
         "claims": total,
         "supported": supported,
         "unsupported": unsupported,
-        "rule": "cited + >=50% token overlap + all numbers present in cited source",
+        "rule": (
+            "cited + >=50% token overlap + all numbers present in cited source "
+            "(or computed by a calc whose operands are all in the source, "
+            "or stated by the user in the question)"
+        ),
     }
 
 

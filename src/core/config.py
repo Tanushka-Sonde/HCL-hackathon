@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     tavily_api_key: str = ""
     groq_api_key: str = ""
-    groq_model_name: str = "llama-3.1-8b-instant"
+    groq_model_name: str = "llama-3.3-70b-versatile"
     groq_vision_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     # ── LLM Gateway ──────────────────────────────────────────
@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     kis_table_chunk_max_chars: int = 4000
     llm_price_input_per_1k: float = 0.00005
     llm_price_output_per_1k: float = 0.00008
-    prompt_template_version: str = "kis-grounded-v1"
+    prompt_template_version: str = "kis-grounded-v2"  # v2 adds {{calc: ...}}
 
     # ── Server ────────────────────────────────────────────────
     app_name: str = "AI Research Platform"
