@@ -94,8 +94,24 @@ def compute_metrics(
             "p50_total_ms": _pct(totals, 50),
         }
 
+    # Measured retrieval: only eval cases know which documents were expected.
+    ranks = [
+        (e.get("eval") or {}).get("rank")
+        for e in events
+        if (e.get("eval") or {}).get("expected_docs")
+    ]
+    ranks = [r for r in ranks if r is not None]
+    eval_retrieval = {
+        "n": len(ranks),
+        "hit_rate": _rate(sum(1 for r in ranks if r > 0), len(ranks)),
+        "mrr": round(float(np.mean([1 / r if 0 < r <= 5 else 0.0 for r in ranks])), 4)
+        if ranks
+        else None,
+    }
+
     return {
         "total_queries": total,
+        "eval_retrieval": eval_retrieval,
         "execution": {
             "http_ok": sum(1 for e in events if e["execution"]["http_status"] == 200),
             "stage_errors": sum(1 for e in events if e["errors"]),

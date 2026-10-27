@@ -6,7 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-ConfigId = Literal["A", "B"]
+# A = vector only, B = hybrid + rerank, C = hybrid without rerank (ablation)
+ConfigId = Literal["A", "B", "C"]
 Outcome = Literal["success", "partial", "failed"]
 Route = Literal["docs", "sql_tool", "both"]
 

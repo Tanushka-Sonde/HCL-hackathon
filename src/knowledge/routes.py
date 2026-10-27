@@ -261,7 +261,7 @@ async def query_multimodal(
     image: UploadFile,
     query: str = Form(default="", max_length=2000),
     session_id: str | None = Form(default=None, max_length=64),
-    config_id: str = Form(default="B", pattern="^[AB]$"),
+    config_id: str = Form(default="B", pattern="^[ABC]$"),
     top_k: int = Form(default=5, ge=1, le=10),
     max_input_tokens: int = Form(default=3000, ge=256, le=32_000),
     max_output_tokens: int = Form(default=500, ge=32, le=4096),
@@ -404,7 +404,7 @@ def _filtered_events(
 
 @router.get("/metrics")
 async def metrics(
-    config_id: str | None = Query(default=None, pattern="^[AB]$"),
+    config_id: str | None = Query(default=None, pattern="^[ABC]$"),
     outcome: str | None = Query(default=None, pattern="^(success|partial|failed)$"),
     since_hours: float | None = Query(default=None, gt=0, le=24 * 365),
     include_eval: bool = True,
@@ -423,7 +423,7 @@ async def metrics(
 
 @router.get("/queries")
 async def list_queries(
-    config_id: str | None = Query(default=None, pattern="^[AB]$"),
+    config_id: str | None = Query(default=None, pattern="^[ABC]$"),
     outcome: str | None = Query(default=None, pattern="^(success|partial|failed)$"),
     since_hours: float | None = Query(default=None, gt=0, le=24 * 365),
     include_eval: bool = True,
@@ -481,5 +481,16 @@ async def start_eval(
 
 
 @router.get("/eval/status")
-async def eval_status(_: CurrentUser = Depends(admin_user)) -> dict[str, Any]:
+async def eval_status(
+    _: CurrentUser = Depends(admin_user), svc: KnowledgeService = Depends(get_service)
+) -> dict[str, Any]:
+    if _eval_state.get("status") == "idle":
+        # After a restart, show the last saved run instead of "idle".
+        last = svc.store.latest_eval_run()
+        if last:
+            return {
+                "status": "completed",
+                "result": last,
+                "finished_at": last["finished_at"],
+            }
     return {k: v for k, v in _eval_state.items() if k != "task"}

@@ -142,11 +142,10 @@ class KnowledgeService:
     # ── Configuration ────────────────────────────────────────
 
     def config_label(self, config_id: str) -> str:
-        pipeline = (
-            "vector-only"
-            if config_id == "A"
-            else f"hybrid(vector+bm25,rrf)+rerank:{self.reranker.name}"
-        )
+        pipeline = {
+            "A": "vector-only",
+            "C": "hybrid(vector+bm25,rrf)-no-rerank",
+        }.get(config_id, f"hybrid(vector+bm25,rrf)+rerank:{self.reranker.name}")
         return (
             f"{config_id}|{pipeline}|emb:{self.embedder_name}|"
             f"chunk:{self.settings.kis_chunk_size}/{self.settings.kis_chunk_overlap}"
@@ -170,7 +169,7 @@ class KnowledgeService:
             "min_evidence_score": self.settings.kis_min_evidence_score,
             "grounding_threshold": self.settings.kis_grounding_threshold,
             "indexed_chunks": len(self.index),
-            "configs": {c: self.config_label(c) for c in ("A", "B")},
+            "configs": {c: self.config_label(c) for c in ("A", "B", "C")},
             "vision_model": self.vision.model if self.vision.enabled else None,
             "vision_enabled": self.vision.enabled,
             "max_upload_mb": self.settings.kis_max_upload_mb,

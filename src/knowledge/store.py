@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS assets (
     height INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_assets_document ON assets(document_id);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+    batch_id TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
 """
 
 # Columns added after the first release; created on startup if missing.
@@ -238,6 +245,24 @@ class KnowledgeStore:
                 "SELECT * FROM documents ORDER BY created_at DESC"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def save_eval_run(
+        self, batch_id: str, started_at: str, finished_at: str, result: dict[str, Any]
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO eval_runs (batch_id, started_at, finished_at, "
+                "payload) VALUES (?, ?, ?, ?)",
+                (batch_id, started_at, finished_at, json.dumps(result, default=str)),
+            )
+            self._conn.commit()
+
+    def latest_eval_run(self) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM eval_runs ORDER BY finished_at DESC LIMIT 1"
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
 
     def get_asset(self, asset_id: str) -> dict[str, Any] | None:
         with self._lock:
